@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AMExclusive 架構概覽</title>
+<style>
+:root {
+  --bg: #fafaf9;
+  --surface: #ffffff;
+  --surface-2: #f3f3f1;
+  --text: #1c1c1a;
+  --muted: #5d5d58;
+  --border: #e2e1dc;
+  --accent: #b4235a;
+  --accent-soft: #fbe9f0;
+  --ok: #1f7a4d;
+  --warn: #9a5b00;
+  --warn-soft: #fff4e0;
+  --code-bg: #f1f0ec;
+  --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141413;
+    --surface: #1d1d1b;
+    --surface-2: #252522;
+    --text: #ecebe6;
+    --muted: #a3a29b;
+    --border: #34332f;
+    --accent: #f0709f;
+    --accent-soft: #3a1a27;
+    --ok: #5fcf96;
+    --warn: #f2b24c;
+    --warn-soft: #33270f;
+    --code-bg: #262623;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141413;
+  --surface: #1d1d1b;
+  --surface-2: #252522;
+  --text: #ecebe6;
+  --muted: #a3a29b;
+  --border: #34332f;
+  --accent: #f0709f;
+  --accent-soft: #3a1a27;
+  --ok: #5fcf96;
+  --warn: #f2b24c;
+  --warn-soft: #33270f;
+  --code-bg: #262623;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.65 var(--sans);
+}
+main { max-width: 960px; margin: 0 auto; padding: 40px 16px 80px; }
+header { margin-bottom: 40px; }
+h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+h1 .dot { color: var(--accent); }
+.lede { color: var(--muted); margin: 0; max-width: 64ch; }
+.meta { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px; }
+.pill {
+  font-size: 0.8rem; padding: 2px 10px; border-radius: 999px;
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--muted);
+}
+nav.toc {
+  display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 12px 0;
+  border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  margin-bottom: 40px; font-size: 0.9rem;
+}
+nav.toc a { color: var(--muted); text-decoration: none; }
+nav.toc a:hover { color: var(--accent); }
+section { margin-bottom: 56px; }
+h2 { font-size: 1.35rem; margin: 0 0 16px; padding-top: 8px; }
+h3 { font-size: 1.05rem; margin: 24px 0 8px; }
+p { margin: 0 0 12px; }
+code {
+  font-family: var(--mono); font-size: 0.86em;
+  background: var(--code-bg); padding: 1px 5px; border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+pre {
+  font-family: var(--mono); font-size: 0.82rem; line-height: 1.5;
+  background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; margin: 0 0 16px;
+}
+pre code { background: none; padding: 0; font-size: inherit; }
+.table-wrap { overflow-x: auto; margin: 0 0 16px; border: 1px solid var(--border); border-radius: 8px; }
+table { width: 100%; border-collapse: collapse; font-size: 0.92rem; background: var(--surface); }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { background: var(--surface-2); font-weight: 600; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+td:first-child { white-space: nowrap; }
+
+/* Process topology diagram */
+.topo { display: grid; gap: 12px; margin: 8px 0 20px; }
+.topo-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.node {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 14px;
+}
+.node.broker { border-color: var(--accent); background: var(--accent-soft); }
+.node .name { font-family: var(--mono); font-weight: 600; font-size: 0.9rem; }
+.node .role { font-size: 0.8rem; color: var(--muted); }
+.node .dll {
+  margin-top: 8px; font-family: var(--mono); font-size: 0.8rem;
+  border-top: 1px dashed var(--border); padding-top: 8px;
+}
+.link { text-align: center; font-size: 0.8rem; color: var(--muted); }
+
+/* Pipeline */
+.pipeline { display: flex; flex-direction: column; gap: 0; margin: 8px 0 20px; }
+.stage {
+  display: grid; grid-template-columns: 28px 1fr; gap: 12px; align-items: start;
+  padding: 10px 0;
+}
+.stage .num {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: var(--accent); color: var(--bg);
+  display: grid; place-items: center; font-size: 0.8rem; font-weight: 700;
+}
+.stage .body { border-left: 2px solid var(--border); padding-left: 14px; margin-left: -27px; padding-left: 41px; }
+.stage .title { font-weight: 600; }
+.stage .title code { font-weight: 500; }
+.stage .desc { color: var(--muted); font-size: 0.92rem; }
+
+/* Gate states */
+.states { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0 16px; }
+.state {
+  font-family: var(--mono); font-size: 0.82rem; padding: 4px 10px; border-radius: 6px;
+  background: var(--surface); border: 1px solid var(--border);
+}
+.state.hot { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.state.bad { border-color: var(--warn); color: var(--warn); }
+.arrow { color: var(--muted); font-size: 0.85rem; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+}
+.card h3 { margin-top: 0; }
+.card p:last-child, .card ul:last-child { margin-bottom: 0; }
+ul { padding-left: 1.2em; margin: 0 0 12px; }
+li { margin-bottom: 4px; }
+.callout {
+  background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 10px;
+  padding: 12px 16px; margin: 0 0 16px; font-size: 0.94rem;
+}
+.callout strong { color: var(--warn); }
+footer { color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--border); padding-top: 16px; }
+
+@media (max-width: 640px) {
+  h1 { font-size: 1.6rem; }
+  .topo-row { grid-template-columns: 1fr; }
+  th, td { padding: 8px 10px; }
+}
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>AMExclusive<span class="dot">.</span> 架構概覽</h1>
+  <p class="lede">Apple Music for Windows 的注入式 mod：WASAPI 獨占輸出、強制最高音質（ALAC Hi-Res），目標是 bit-perfect 播放。本頁整理程序拓樸、hook 點、音訊資料路徑與建置流程。</p>
+  <div class="meta">
+    <span class="pill">Windows 11 x64</span>
+    <span class="pill">C++20 / MSVC / CMake</span>
+    <span class="pill">Apple Music 1.6.4.90</span>
+    <span class="pill">package 1.1540.23042.0</span>
+    <span class="pill">MinHook · rigtorp/SPSCQueue · C++/WinRT</span>
+  </div>
+</header>
+
+<nav class="toc" aria-label="目錄">
+  <a href="#topology">程序拓樸</a>
+  <a href="#components">元件</a>
+  <a href="#ipc">IPC</a>
+  <a href="#quality">音質鎖</a>
+  <a href="#audio">獨占輸出路徑</a>
+  <a href="#build">建置與安裝</a>
+  <a href="#config">設定與日誌</a>
+  <a href="#notes">注意事項</a>
+</nav>
+
+<section id="topology">
+  <h2>程序拓樸</h2>
+  <p>Apple Music 啟動時，Windows 工作排程器（觸發條件：<code>Microsoft-Windows-AppModel-Runtime/Admin</code> EventID 201，ImageName = <code>AppleMusic.exe</code>）會拉起 Broker。Broker 綁定該 <code>AppleMusic.exe</code> PID，對兩個 Apple 程序做 <code>CreateRemoteThread + LoadLibraryW</code> 注入，並作為 named pipe 的中樞。</p>
+
+  <div class="topo" role="img" aria-label="Broker 注入 UI DLL 到 AppleMusic.exe、注入 Hook DLL 到 AMPLibraryAgent.exe，三者以 named pipe 通訊">
+    <div class="node broker">
+      <div class="name">am-exclusive-broker.exe</div>
+      <div class="role">companion · 生命週期綁定 AppleMusic.exe PID · IPC 中樞 · 持久化 ini · 錯誤對話框</div>
+    </div>
+    <div class="link">↓ 注入 DLL　·　↕ named pipe <code>Message</code>（固定大小、pack(1)）</div>
+    <div class="topo-row">
+      <div class="node">
+        <div class="name">AppleMusic.exe</div>
+        <div class="role">WinUI 3 前端</div>
+        <div class="dll">+ am-exclusive-ui.dll<br><span class="role">Role::Ui · 設定頁開關 · transport 手勢</span></div>
+      </div>
+      <div class="node">
+        <div class="name">AMPLibraryAgent.exe</div>
+        <div class="role">實際解碼與播放程序</div>
+        <div class="dll">+ am-exclusive-hook.dll<br><span class="role">Role::Agent · 音質鎖 · audio core v2</span></div>
+      </div>
+    </div>
+  </div>
+
+  <p>Broker 在綁定的 host 結束時退出；Agent 殘留不會讓它繼續存活。工作排程器設定為 <code>MultipleInstances = StopExisting</code>，所以每次新啟動的 Apple Music 都會換一個新的 companion。</p>
+</section>
+
+<section id="components">
+  <h2>元件</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>產物</th><th>原始碼</th><th>職責</th></tr></thead>
+      <tbody>
+        <tr><td><code>am-exclusive-broker.exe</code></td><td><code>Broker.cpp</code></td><td>ProcessWatcher 輪詢並注入；pipe server；持有使用者 intent（<code>mode</code>）與 hardware buffer；Agent 回報失敗時以 TaskDialog 提示，並呼叫 media control 拒絕目前曲目</td></tr>
+        <tr><td><code>am-exclusive-ui.dll</code></td><td><code>UiAdapter.cpp</code></td><td>以 C++/WinRT 走訪 WinUI 視覺樹，在 <code>PlaybackSettingsPage</code> 插入 <code>AMExclusiveModeToggle</code> 與 <code>AMExclusiveHardwareBufferInput</code>；觀察 MiniPlayer 與主視窗的播放、跳曲、拖曳進度手勢並送出 <code>TransportIntent</code></td></tr>
+        <tr><td><code>am-exclusive-hook.dll</code></td><td><code>HookDll.cpp</code>、<code>LosslessQualityLock.cpp</code>、<code>audio_v2/*</code></td><td>MinHook 掛 CoreAudioToolbox / AVFoundationCF / CoreMedia / ole32 與 MMDevice vtable；實作音質鎖與 WASAPI 獨占 sink</td></tr>
+        <tr><td><code>am_exclusive_media_control.exe</code></td><td><code>MediaSessionControl.cpp</code></td><td>SMTC 輔助程式：<code>reject-current</code> / <code>restart-current</code></td></tr>
+        <tr><td><code>AMExclusive-Setup.exe</code></td><td><code>SetupInstaller.cpp</code> + <code>scripts/*.ps1</code></td><td>單檔安裝程式（payload 嵌於 RC）；安裝到 <code>%PUBLIC%\AMExclusive</code>、註冊工作排程器、HKCU 解除安裝項；<code>--extract-test</code> 供 CI 驗證</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="ipc">
+  <h2>IPC 協定</h2>
+  <p><code>IpcProtocol.h</code>：magic <code>"AMIP"</code>，protocol <code>2.0</code>。每則訊息都是同一個 trivially-copyable 的 <code>Message</code> 結構（&lt; 4096 bytes），依 <code>type</code> 解讀欄位。pipe 名稱與安全描述元綁定目前使用者的 SID；Broker 會比對 <code>GetNamedPipeClientProcessId</code> 與 <code>senderPid</code>。</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>MessageType</th><th>方向</th><th>語意</th></tr></thead>
+      <tbody>
+        <tr><td><code>Hello / HelloAck</code></td><td>client ↔ Broker</td><td>握手；新 Agent PID 會把 state 重設為 <code>WaitingForStream</code></td></tr>
+        <tr><td><code>SetEnabled</code></td><td>Ui → Broker</td><td>使用者切換獨占；寫入 ini <code>mode=exclusive|probe</code></td></tr>
+        <tr><td><code>SetHardwareBuffer</code></td><td>Ui → Broker</td><td>1–100 ms，寫入 <code>period_100ns</code>，下一首生效</td></tr>
+        <tr><td><code>StatusChanged</code></td><td>Broker → all / Agent → Broker</td><td>Broker 擁有 <code>enabledIntent</code>，Agent 的事件只能更新 runtime state</td></tr>
+        <tr><td><code>AttemptFailed</code></td><td>Agent → Broker</td><td>結束本次嘗試，但保留使用者 intent，下一首重新 arm</td></tr>
+        <tr><td><code>TransportIntent</code></td><td>Ui → Broker → Agent</td><td><code>detail</code> 帶動作（<code>play_pause</code>、<code>skip_arm</code>、<code>skip</code>、<code>seek_begin</code>、<code>seek_commit</code>、<code>selection_arm</code>），<code>generation</code> 帶手勢 epoch</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p><code>RuntimeState</code>：Off → Requested → WaitingForStream → Probing → Initializing → AlignRetry → Active → DisablePending / FailedOff。</p>
+</section>
+
+<section id="quality">
+  <h2>路徑一：音質鎖</h2>
+  <p>只要 hook 安裝成功就啟用，<strong>不受</strong> UI 獨占開關影響（<code>QualityLockHookLoop</code>）。只有當 Apple 的偏好設定為 <code>losslessEnabled</code> 且 <code>preferredStreamPlaybackAudioQuality</code> 為 15 或 20 時才介入。</p>
+  <div class="cards">
+    <div class="card">
+      <h3><code>AVCFPlayerItemSetVariantPreferences</code></h3>
+      <p>強制 lossless bit <code>0x8</code>，清掉 spatial/immersive bit <code>0x3</code>，避免被切換到 AAC 相容分支。</p>
+    </div>
+    <div class="card">
+      <h3><code>AVCFPlayerItemSetPreferredMaximumAudioSampleRate</code></h3>
+      <p>tier 20 時把上限拉到 192 kHz。</p>
+    </div>
+    <div class="card">
+      <h3><code>FigAlternateEligibleLosslessAudioFilterCreate</code></h3>
+      <p>改用只允許 <code>alac</code> / <code>qlac</code> 的嚴格 subtype filter（<code>LosslessQualityLock.cpp</code>）。strict 模式下不會 fallback 到 Apple 的自適應 filter，寧可等待也不降級。</p>
+    </div>
+  </div>
+  <p style="margin-top:12px">私有 ABI（filter class table slot、CoreMedia RVA 指紋、ALAC cookie offset、local seek 呼叫堆疊 RVA）集中在 <code>ApplePrivateOffsets.h</code>。Apple Music 改版時，要從這裡重新驗證。</p>
+</section>
+
+<section id="audio">
+  <h2>路徑二：獨占輸出（audio core v2）</h2>
+  <p>這條路徑受 UI 開關控制。Apple 的解碼與排程維持原樣（<code>kNativeAcquisitionPassthrough = true</code>）；mod 只鏡像解碼後的 float32 P0，並接手實體端點。</p>
+
+  <div class="pipeline">
+    <div class="stage"><div class="num">1</div><div class="body">
+      <div class="title">Converter 登記 — <code>AudioConverterNew[Specific]</code> / <code>SetProperty</code></div>
+      <div class="desc"><code>AudioCoreConverterRegistry</code>：固定槽位、全 atomic，記錄來源格式、ALAC cookie 位元深度，以及 decoder ↔ P0 converter 的對應。</div>
+    </div></div>
+    <div class="stage"><div class="num">2</div><div class="body">
+      <div class="title">Graph 驗證 — <code>AudioUnitSetProperty</code> / <code>Initialize</code> / <code>AudioOutputUnitStart</code></div>
+      <div class="desc">先確認 active AudioUnit graph，才把 converter 綁定到目前的 generation。綁定靠 observation id，不靠建立順序推斷。</div>
+    </div></div>
+    <div class="stage"><div class="num">3</div><div class="body">
+      <div class="title">P0 擷取 — <code>AudioConverterFillComplexBuffer</code> → <code>ApplePcmTap</code></div>
+      <div class="desc">callback 執行緒只把 float32 複製進預先配置的 SPSC queue（<code>PcmQueue</code>），不配置記憶體也不等待。</div>
+    </div></div>
+    <div class="stage"><div class="num">4</div><div class="body">
+      <div class="title">整數化 — <code>ExactSampleMapper</code> / <code>LocalFloatIntegerizer</code></div>
+      <div class="desc">整數來源（ALAC 16/24-bit）必須精確落在原本的 PCM lattice 上（×2³¹ 後不得有小數），否則 fail-closed，不做 rounding 或 dither。本機 float32 檔案另走 round-half-even 量化成 PCM32，這一類不算 bit-perfect。</div>
+    </div></div>
+    <div class="stage"><div class="num">5</div><div class="body">
+      <div class="title">Sink — <code>QueuedPcmSource</code> → <code>WasapiExclusiveSink</code></div>
+      <div class="desc">實作 <code>IIntegerPcmSource::Fill(int32*, …)</code>。sink 以 event-driven 的 WASAPI 獨占模式開在預設端點（<code>eRender / eConsole</code>），會嘗試多組格式候選與 buffer 對齊重試。source 暫時不足時回傳 <code>kAudioSourceWouldBlock</code>，sink 會暫停而不是補靜音。</div>
+    </div></div>
+    <div class="stage"><div class="num">6</div><div class="body">
+      <div class="title">壓掉原生輸出 — <code>CoCreateInstance</code> → MMDevice vtable → <code>NativeRenderGateProxy</code></div>
+      <div class="desc">包住 Apple 的 <code>IAudioClient</code> / <code>IAudioRenderClient</code>。gate 進入 Active 後，原生輸出改為 shadow（讓 Apple 的排程繼續運轉，但不出聲）；handoff 時釋放 Apple 的 shared client，讓出端點。</div>
+    </div></div>
+  </div>
+
+  <h3><code>AudioCoreGate</code> 狀態機</h3>
+  <div class="states" role="img" aria-label="Off、Armed、Capturing、Prebuffered、Active，任一階段可進入 Faulted">
+    <span class="state">Off</span><span class="arrow">→</span>
+    <span class="state">Armed</span><span class="arrow">→</span>
+    <span class="state">Capturing</span><span class="arrow">→</span>
+    <span class="state">Prebuffered</span><span class="arrow">→</span>
+    <span class="state hot">Active</span>
+    <span class="arrow">·</span>
+    <span class="state bad">Faulted</span>
+  </div>
+  <p>每次 UI 切換都會遞增 <code>generation</code>，舊 token 自動失效。只有 <code>CommitCutover</code>（sink 已 Start 且已 prebuffer）會讓 <code>ShouldSuppressNative()</code> 變成 true。</p>
+
+  <h3>重要類別</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>類別</th><th>角色</th></tr></thead>
+      <tbody>
+        <tr><td><code>AudioCoreRuntime</code></td><td>hook 的入口；私有 worker 執行緒負責所有端點所有權轉換；處理 transport intent</td></tr>
+        <tr><td><code>AudioCoreCoordinator</code></td><td>generation 邊界；持有 <code>WasapiExclusiveSink sink_</code> 與 queue</td></tr>
+        <tr><td><code>WasapiExclusiveSink</code></td><td>Open / Start / Stop / Close；render 執行緒；格式協商；lifecycle 事件</td></tr>
+        <tr><td><code>NativeRenderGateProxy</code></td><td>Apple <code>IAudioRenderClient</code> 的 proxy；suppress / shadow / detach</td></tr>
+        <tr><td><code>BitPerfectVerifier</code></td><td>診斷用的逐樣本驗證（<code>deepDiagnostics</code>）</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="build">
+  <h2>建置與安裝</h2>
+  <p>只能在 Windows 上建置：需要 MSVC、Windows 11 SDK（<code>cppwinrt.exe</code>）、CMake ≥ 3.24 與 PowerShell。WinUI projection 由 <code>Microsoft.UI.Xaml.winmd</code> 產生，來源可以是本機安裝的 Apple Music 套件，或 <code>Get-WinUIMetadata.ps1</code> 從 NuGet 下載（會驗 SHA-256）。</p>
+<pre><code>cd mod
+.\scripts\Get-WinUIMetadata.ps1 -OutputDirectory .\build\winui-metadata
+.\scripts\Build-Mod.ps1 -Configuration Release -WinUIMetadataDirectory .\build\winui-metadata
+# → mod\build\dist\AMExclusive-Setup.exe</code></pre>
+  <ul>
+    <li>CI：<code>.github/workflows/build-setup.yml</code>，只能手動觸發（<code>workflow_dispatch</code>），在 <code>windows-2022</code> 上建置並執行 <code>--extract-test</code>，產出的 artifact 保留 14 天。</li>
+    <li>MinHook 透過 <code>FetchContent</code> 抓取（v1.3.4）；SPSCQueue 以原始碼放在 <code>third_party/</code>。</li>
+    <li>安裝腳本 <code>Install-Mod.ps1</code> 會先停掉 Apple Music / Agent / Broker，保留舊 ini 的 <code>mode</code> 與 <code>period_100ns</code>，用 icacls 設定目錄權限（使用者、SYSTEM、ALL APPLICATION PACKAGES 唯讀），寫入 manifest，再執行 <code>Register-Companion.ps1</code>。</li>
+    <li>目前沒有自動化測試；<code>/mod/tests/</code> 在 <code>.gitignore</code> 裡。</li>
+  </ul>
+</section>
+
+<section id="config">
+  <h2>設定與日誌</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>位置</th><th>內容</th></tr></thead>
+      <tbody>
+        <tr><td><code>%PUBLIC%\AMExclusive\am-exclusive.ini</code></td><td><code>[mod] mode=exclusive|probe</code>、<code>period_100ns</code>（預設 200000 = 20 ms）、<code>native_trace</code>（診斷，預設 false）</td></tr>
+        <tr><td><code>am-exclusive-broker.log</code></td><td>Broker（4 MB × 2 輪替）</td></tr>
+        <tr><td><code>am-exclusive.log</code></td><td>Hook DLL（Agent 程序內）</td></tr>
+        <tr><td><code>am-exclusive-ui.log</code></td><td>UI DLL</td></tr>
+        <tr><td><code>am-exclusive-recovery.log</code></td><td>media control 輔助程式</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="notes">
+  <h2>注意事項</h2>
+  <div class="callout"><strong>版本綁定。</strong>私有 RVA 與呼叫堆疊指紋只在 Apple Music 1.6.4.90 驗證過。其他版本的音質鎖會因指紋不符而停用（fail-closed），但 UI 樹結構的變動不一定能被偵測到。</div>
+  <ul>
+    <li>端點固定是預設裝置；IPC 的 <code>endpointId</code> 欄位與 <code>WasapiSinkConfig::endpointId</code> 已經存在，但 UI 沒有開放裝置選擇。</li>
+    <li><code>IIntegerPcmSource</code> 是 sink 與資料來源之間的抽象邊界；<code>AudioCoreCoordinator</code> 目前直接持有具體型別 <code>WasapiExclusiveSink</code>。</li>
+    <li><code>HookDll.cpp</code> 約 3.6k 行，混合了正式路徑與 native trace 診斷；<code>SampleConversion.h</code> 是空檔。</li>
+    <li>本 repo 是 <code>JagLin/AMExclusive</code>，fork 自 <code>AntiOblivionis/AMExclusive</code>，README 的連結仍指向上游。</li>
+  </ul>
+</section>
+
+<footer>依 commit <code>91380f7</code> 的原始碼整理 · 2026-10-21</footer>
+</main>
+</body>
+</html>
