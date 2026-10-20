@@ -3040,6 +3040,28 @@ void V2OnSinkLifecycle(void*, ammod::audio_v2::ExclusiveSinkLifecycleEvent event
         L" qpc=" + std::to_wstring(CurrentQpc()) + L" result=" + HResultText(result));
 }
 
+void V2OnSinkDiagnostic(void*, const wchar_t* text) noexcept {
+    Log(L"v2 sink " + std::wstring(text ? text : L""));
+}
+
+// output=asio routes the exclusive stream to the ASIO driver named by
+// asio_driver (its HKLM\SOFTWARE\ASIO key). Anything else keeps WASAPI.
+void ConfigureOutputBackend() {
+    std::wstring output = ReadSetting(L"output", L"wasapi");
+    std::transform(output.begin(), output.end(), output.begin(), towlower);
+    if (output != L"asio") {
+        Log(L"output backend=wasapi");
+        return;
+    }
+    const std::wstring driver = ReadSetting(L"asio_driver", L"");
+    if (driver.empty()) {
+        Log(L"output=asio requested without asio_driver; keeping wasapi");
+        return;
+    }
+    g_audioCoreRuntime.SetOutputBackend(ammod::audio_v2::ExclusiveSinkBackend::Asio, driver);
+    Log(L"output backend=asio driver=" + driver);
+}
+
 void V2OnNativeInitialize(void* context, void* client, const wchar_t* endpoint,
                           AUDCLNT_SHAREMODE shareMode, DWORD flags,
                           const WAVEFORMATEX* format, HRESULT result) noexcept {
@@ -3535,7 +3557,8 @@ DWORD WINAPI InitializeHooks(void*) {
         &V2PrepareNativeHandoff, &V2FinalizeNativeHandoff,
         &V2ResumeNativeAfterFailedHandoff, &V2PrepareNativeGraphHandoff,
         &V2ResumeNativeGraphAfterFailedHandoff, kNativeAcquisitionPassthrough,
-        g_nativeTraceEnabled.load(std::memory_order_acquire)};
+        g_nativeTraceEnabled.load(std::memory_order_acquire), &V2OnSinkDiagnostic};
+    ConfigureOutputBackend();
     if (!g_audioCoreRuntime.Start(runtimeCallbacks)) {
         Log(L"audio core v2 runtime worker failed to start; core remains fail-closed");
     }

@@ -40,6 +40,7 @@ struct AudioCoreRuntimeCallbacks final {
     // Expensive per-sample verification is diagnostic-only. Production keeps
     // the exact mapper fail-closed but does not remap every sample a second time.
     bool deepDiagnostics{};
+    ExclusiveSinkDiagnosticCallback onSinkDiagnostic{};
 };
 
 struct AudioCorePcmFillStats final {
@@ -103,6 +104,9 @@ public:
     void Stop() noexcept;
     void SetUiEnabled(bool enabled) noexcept;
     void SetHardwareBufferMilliseconds(std::uint32_t milliseconds) noexcept;
+    // Selects the physical output for the next bound generation; the current
+    // song keeps its sink. asioDriver is the HKLM\SOFTWARE\ASIO key name.
+    void SetOutputBackend(ExclusiveSinkBackend backend, const std::wstring& asioDriver) noexcept;
     bool UiEnabled() const noexcept { return uiEnabled_.load(std::memory_order_acquire); }
 
     // UI transport intents are control-plane only. They gate when the exact
@@ -282,6 +286,9 @@ private:
     std::atomic<std::uint64_t> boundMediaGeneration_{};
     std::uint32_t requiredPrebufferFrames_{};
     std::wstring nativeEndpoint_;
+    // Guarded by controlMutex_.
+    ExclusiveSinkBackend outputBackend_{ExclusiveSinkBackend::Wasapi};
+    std::wstring asioDriver_;
     ULONGLONG nextTelemetryTick_{};
     // Read-only classifier snapshots continue while the UI switch is Off.
     // This is deliberately separate from the Active telemetry tick so an

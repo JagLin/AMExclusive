@@ -51,6 +51,7 @@ add_library(am_exclusive_hook SHARED
   src/HookDll.cpp
   src/IpcTransport.cpp
   src/LosslessQualityLock.cpp
+  src/audio_v2/AsioSink.cpp
   src/audio_v2/AudioCoreCoordinator.cpp
   src/audio_v2/AudioCoreRuntime.cpp
   src/audio_v2/NativeRenderGateProxy.cpp
@@ -59,6 +60,17 @@ target_include_directories(am_exclusive_hook PRIVATE
   src "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/rigtorp-SPSCQueue/include")
 target_compile_definitions(am_exclusive_hook PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(am_exclusive_hook PRIVATE minhook ole32 uuid advapi32 avrt)
+# The Steinberg ASIO SDK is used under its proprietary licence and is never
+# committed; each developer keeps a local copy. Without it AsioSink compiles
+# as an always-unavailable backend.
+set(AMMOD_ASIO_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/asiosdk"
+    CACHE PATH "Local Steinberg ASIO SDK root (not redistributed)")
+if(EXISTS "${AMMOD_ASIO_SDK_DIR}/common/iasiodrv.h")
+  target_include_directories(am_exclusive_hook PRIVATE "${AMMOD_ASIO_SDK_DIR}/common")
+  message(STATUS "ASIO output enabled with SDK at ${AMMOD_ASIO_SDK_DIR}")
+else()
+  message(STATUS "ASIO SDK not found at ${AMMOD_ASIO_SDK_DIR}; ASIO output disabled")
+endif()
 set_target_properties(am_exclusive_hook PROPERTIES OUTPUT_NAME "am-exclusive-hook")
 
 add_library(am_exclusive_ui SHARED src/UiAdapter.cpp src/IpcTransport.cpp)

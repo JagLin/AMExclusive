@@ -65,11 +65,21 @@ enum class ExclusiveSinkLifecycleEvent : std::uint8_t {
 using ExclusiveSinkLifecycleCallback = void (*)(
     void* context, ExclusiveSinkLifecycleEvent event, HRESULT result) noexcept;
 
+// Free-form, diagnostic-only text (negotiated driver format, buffer size...).
+// Never invoked from a real-time render callback.
+using ExclusiveSinkDiagnosticCallback = void (*)(void* context, const wchar_t* text) noexcept;
+
+enum class ExclusiveSinkBackend : std::uint8_t {
+    Wasapi,
+    Asio,
+};
+
 struct ExclusiveSinkConfig final {
     PcmFormat format{};
     std::array<PcmFormat, kMaxFormatCandidates> formatCandidates{};
     std::uint32_t formatCandidateCount{};
-    // Backend-specific device identity: the MMDevice endpoint id for WASAPI.
+    // Backend-specific device identity: the MMDevice endpoint id for WASAPI,
+    // the driver name under HKLM\SOFTWARE\ASIO for ASIO.
     std::wstring endpointId;
     std::uint32_t periodFrames{};
     // WASAPI only: retries after AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED.
@@ -79,6 +89,7 @@ struct ExclusiveSinkConfig final {
     HANDLE sourceReadyEvent{};
     void* lifecycleContext{};
     ExclusiveSinkLifecycleCallback onLifecycle{};
+    ExclusiveSinkDiagnosticCallback onDiagnostic{};
 };
 
 struct ExclusiveSinkStats final {

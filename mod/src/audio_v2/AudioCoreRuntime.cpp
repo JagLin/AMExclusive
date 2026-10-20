@@ -187,6 +187,13 @@ void AudioCoreRuntime::SetHardwareBufferMilliseconds(std::uint32_t milliseconds)
     hardwareBufferMs_.store(milliseconds, std::memory_order_release);
 }
 
+void AudioCoreRuntime::SetOutputBackend(ExclusiveSinkBackend backend,
+                                        const std::wstring& asioDriver) noexcept {
+    std::lock_guard lock(controlMutex_);
+    outputBackend_ = backend;
+    asioDriver_ = asioDriver;
+}
+
 void AudioCoreRuntime::OnTransportPlayPause() noexcept {
     if (!UiEnabled()) return;
     std::lock_guard lock(controlMutex_);
@@ -1270,11 +1277,16 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
             PcmEncoding::SignedInteger, true,
             static_cast<std::uint16_t>(snapshot.registration.sourceBitDepth)};
     }
-    config.sink.endpointId = nativeEndpoint_;
+    // The native handoff below still releases Apple's own WASAPI client on
+    // nativeEndpoint_; only the physical output that takes over differs.
+    config.backend = outputBackend_;
+    config.sink.endpointId =
+        outputBackend_ == ExclusiveSinkBackend::Asio ? asioDriver_ : nativeEndpoint_;
     config.sink.periodFrames = PeriodFrames(format.sampleRate);
     config.sink.alignmentRetries = 3;
     config.sink.lifecycleContext = callbacks_.context;
     config.sink.onLifecycle = callbacks_.onSinkLifecycle;
+    config.sink.onDiagnostic = callbacks_.onSinkDiagnostic;
     config.queueCapacity = kProductionQueueCapacity;
     config.mediaGeneration = generation;
     config.mappingPolicy = localFloat32

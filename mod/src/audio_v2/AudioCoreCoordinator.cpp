@@ -21,6 +21,9 @@ HRESULT AudioCoreCoordinator::Enable(const AudioCoreCoordinatorConfig& config) n
         config.mediaGeneration == 0) {
         return E_INVALIDARG;
     }
+    sink_ = config.backend == ExclusiveSinkBackend::Asio
+        ? static_cast<IExclusiveSink*>(&asioSink_)
+        : static_cast<IExclusiveSink*>(&wasapiSink_);
 
     sourceReadyEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!sourceReadyEvent_) return HRESULT_FROM_WIN32(GetLastError());

@@ -2,6 +2,7 @@
 
 #include "AudioCoreGate.h"
 #include "AppleOutputGate.h"
+#include "AsioSink.h"
 #include "BitPerfectVerifier.h"
 #include "PcmQueue.h"
 #include "QueuedPcmSource.h"
@@ -17,6 +18,7 @@
 namespace ammod::audio_v2 {
 
 struct AudioCoreCoordinatorConfig final {
+    ExclusiveSinkBackend backend{ExclusiveSinkBackend::Wasapi};
     ExclusiveSinkConfig sink{};
     std::size_t queueCapacity{8};
     std::uint64_t mediaGeneration{1};
@@ -104,8 +106,10 @@ private:
     BitPerfectVerifier verifier_{};
     // Backends are members rather than heap objects so Enable() stays
     // allocation-free on the sink side and the pointer can never dangle; the
-    // coordinator is non-copyable, so &wasapiSink_ is stable for its lifetime.
+    // coordinator is non-copyable, so their addresses are stable for its
+    // lifetime. Enable() switches sink_ only after Disable() closed the old one.
     WasapiExclusiveSink wasapiSink_{};
+    AsioSink asioSink_{};
     IExclusiveSink* sink_{&wasapiSink_};
     HANDLE sourceReadyEvent_{};
     std::uint64_t nextSequence_{};

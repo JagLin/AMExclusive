@@ -120,6 +120,7 @@ Write-ProgressMilestone 32 'stop_runtime'
 
 $preservedMode = $null
 $preservedPeriod100ns = $null
+$preservedOutput = [ordered]@{}
 foreach ($existingIni in @(
     (Join-Path $install 'am-exclusive.ini')
 )) {
@@ -134,6 +135,12 @@ foreach ($existingIni in @(
                 $candidatePeriod -ge 10000 -and $candidatePeriod -le 1000000) {
                 $preservedPeriod100ns = $candidatePeriod
             }
+        }
+        if ($line -match '^\s*output\s*=\s*(wasapi|asio)\s*$') {
+            $preservedOutput['output'] = $Matches[1].ToLowerInvariant()
+        }
+        if ($line -match '^\s*asio_driver\s*=\s*(\S.*?)\s*$') {
+            $preservedOutput['asio_driver'] = $Matches[1]
         }
     }
     if ($preservedMode -and $preservedPeriod100ns) { break }
@@ -174,6 +181,23 @@ if ($preservedPeriod100ns) {
         $iniText, '(?m)^\s*period_100ns\s*=.*$', "period_100ns=$preservedPeriod100ns")
     $utf8NoBom = New-Object Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($iniPath, $iniText, $utf8NoBom)
+}
+if ($preservedOutput.Count -gt 0) {
+    # The shipped ini has no output keys, so preserved ones are appended to
+    # the [mod] section (the file's only section).
+    $iniPath = Join-Path $install 'am-exclusive.ini'
+    $iniText = [IO.File]::ReadAllText($iniPath).TrimEnd("`r", "`n")
+    foreach ($key in $preservedOutput.Keys) {
+        $pattern = "(?m)^\s*$key\s*=.*$"
+        if ([Text.RegularExpressions.Regex]::IsMatch($iniText, $pattern)) {
+            $iniText = [Text.RegularExpressions.Regex]::Replace(
+                $iniText, $pattern, "$key=$($preservedOutput[$key])")
+        } else {
+            $iniText += "`r`n$key=$($preservedOutput[$key])"
+        }
+    }
+    $utf8NoBom = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($iniPath, $iniText + "`r`n", $utf8NoBom)
 }
 foreach ($script in $installerScripts) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $install $script) -Force
