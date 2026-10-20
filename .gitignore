@@ -13,6 +13,8 @@
 /third_party/PortAudio/
 /third_party/microsoft-Windows-classic-samples/
 /third_party/mpv/
+# Steinberg ASIO SDK (proprietary licence): each developer supplies a local copy
+/third_party/asiosdk/
 
 # Build output and generated project files
 mod/build*/
