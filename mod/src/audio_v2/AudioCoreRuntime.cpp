@@ -201,6 +201,16 @@ void AudioCoreRuntime::OnTransportPlayPause() noexcept {
         coordinator_.SinkState() == ExclusiveSinkState::Running) {
         userPauseIntent_ = true;
         coordinator_.PauseEndpoint();
+        if (endOfStreamDrainPending_) {
+            // Apple disposes a local file's converter as soon as pause is
+            // clicked, ~40 ms before this intent arrives over IPC, so the
+            // dispose was classified as a natural end of track and the
+            // unplayed queue was sealed for drain. On resume Apple re-decodes
+            // from its own clock position, which lies before the end of that
+            // sealed queue; playing the queue out first repeats audio. Drop
+            // it and let the resumed graph rebind fresh.
+            RetireCaptureLocked(true);
+        }
         return;
     }
 
@@ -525,6 +535,10 @@ bool AudioCoreRuntime::OnLocalEndOfStream(void* converter) noexcept {
     if (endOfStreamDrainPending_ && endOfStreamDrainConverter_ == converter) {
         return true;
     }
+    // A dispose while the user has paused is Apple tearing down the paused
+    // timeline, not end of media: resume re-decodes from Apple's clock, so
+    // the queued remainder must not be kept for a terminal drain.
+    if (userPauseIntent_) return false;
     ConverterRegistrationSnapshot snapshot{};
     if (!registry_.Snapshot(converter, snapshot) ||
         snapshot.registration.encodedFormat != kAppleLinearPcm) {
