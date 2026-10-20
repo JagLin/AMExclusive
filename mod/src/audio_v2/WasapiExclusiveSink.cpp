@@ -38,10 +38,10 @@ WasapiExclusiveSink::~WasapiExclusiveSink() {
     Close();
 }
 
-HRESULT WasapiExclusiveSink::Open(const WasapiSinkConfig& config) noexcept {
+HRESULT WasapiExclusiveSink::Open(const ExclusiveSinkConfig& config) noexcept {
     Close();
     config_ = config;
-    NotifyLifecycle(WasapiSinkLifecycleEvent::OpenEnter, S_OK);
+    NotifyLifecycle(ExclusiveSinkLifecycleEvent::OpenEnter, S_OK);
     submittedFrames_.store(0, std::memory_order_release);
     submittedBuffers_.store(0, std::memory_order_release);
     controlledSilenceFrames_.store(0, std::memory_order_release);
@@ -57,7 +57,7 @@ HRESULT WasapiExclusiveSink::Open(const WasapiSinkConfig& config) noexcept {
         ? 1u : config_.formatCandidateCount;
     if (candidateCount > kMaxFormatCandidates) {
         RecordError(E_INVALIDARG);
-        NotifyLifecycle(WasapiSinkLifecycleEvent::OpenExit, E_INVALIDARG);
+        NotifyLifecycle(ExclusiveSinkLifecycleEvent::OpenExit, E_INVALIDARG);
         return E_INVALIDARG;
     }
     for (std::uint32_t index = 0; index < candidateCount; ++index) {
@@ -69,7 +69,7 @@ HRESULT WasapiExclusiveSink::Open(const WasapiSinkConfig& config) noexcept {
             EffectiveSourceValidBits(candidate) !=
                 EffectiveSourceValidBits(config_.format)) {
             RecordError(E_INVALIDARG);
-            NotifyLifecycle(WasapiSinkLifecycleEvent::OpenExit, E_INVALIDARG);
+            NotifyLifecycle(ExclusiveSinkLifecycleEvent::OpenExit, E_INVALIDARG);
             return E_INVALIDARG;
         }
     }
@@ -78,7 +78,7 @@ HRESULT WasapiExclusiveSink::Open(const WasapiSinkConfig& config) noexcept {
     if (SUCCEEDED(apartment)) comInitialized_ = true;
     else if (apartment != RPC_E_CHANGED_MODE) {
         RecordError(apartment);
-        NotifyLifecycle(WasapiSinkLifecycleEvent::OpenExit, apartment);
+        NotifyLifecycle(ExclusiveSinkLifecycleEvent::OpenExit, apartment);
         return apartment;
     }
 
@@ -101,12 +101,12 @@ HRESULT WasapiExclusiveSink::Open(const WasapiSinkConfig& config) noexcept {
             CoUninitialize();
             comInitialized_ = false;
         }
-        NotifyLifecycle(WasapiSinkLifecycleEvent::OpenExit, hr);
+        NotifyLifecycle(ExclusiveSinkLifecycleEvent::OpenExit, hr);
         return hr;
     }
 
-    state_.store(WasapiSinkState::Open, std::memory_order_release);
-    NotifyLifecycle(WasapiSinkLifecycleEvent::OpenExit, S_OK);
+    state_.store(ExclusiveSinkState::Open, std::memory_order_release);
+    NotifyLifecycle(ExclusiveSinkLifecycleEvent::OpenExit, S_OK);
     return S_OK;
 }
 
@@ -120,9 +120,9 @@ HRESULT WasapiExclusiveSink::ActivateClient() noexcept {
 }
 
 HRESULT WasapiExclusiveSink::InitializeClient() noexcept {
-    NotifyLifecycle(WasapiSinkLifecycleEvent::InitializeEnter, S_OK);
+    NotifyLifecycle(ExclusiveSinkLifecycleEvent::InitializeEnter, S_OK);
     const auto finish = [this](HRESULT result) noexcept {
-        NotifyLifecycle(WasapiSinkLifecycleEvent::InitializeExit, result);
+        NotifyLifecycle(ExclusiveSinkLifecycleEvent::InitializeExit, result);
         return result;
     };
     if (!client_) return finish(E_UNEXPECTED);
@@ -210,18 +210,18 @@ HRESULT WasapiExclusiveSink::InitializeClient() noexcept {
 }
 
 HRESULT WasapiExclusiveSink::Start(IIntegerPcmSource& source) noexcept {
-    NotifyLifecycle(WasapiSinkLifecycleEvent::StartEnter, S_OK);
+    NotifyLifecycle(ExclusiveSinkLifecycleEvent::StartEnter, S_OK);
     const auto finish = [this](HRESULT result) noexcept {
-        NotifyLifecycle(WasapiSinkLifecycleEvent::StartExit, result);
+        NotifyLifecycle(ExclusiveSinkLifecycleEvent::StartExit, result);
         return result;
     };
-    if (state_.load(std::memory_order_acquire) != WasapiSinkState::Open || !client_ || !render_) {
+    if (state_.load(std::memory_order_acquire) != ExclusiveSinkState::Open || !client_ || !render_) {
         return finish(E_UNEXPECTED);
     }
     if (!shutdownEvent_ || !ResetEvent(shutdownEvent_)) {
         const auto error = HRESULT_FROM_WIN32(GetLastError());
         RecordError(error);
-        state_.store(WasapiSinkState::Faulted, std::memory_order_release);
+        state_.store(ExclusiveSinkState::Faulted, std::memory_order_release);
         return finish(error);
     }
     source_ = &source;
@@ -234,7 +234,7 @@ HRESULT WasapiExclusiveSink::Start(IIntegerPcmSource& source) noexcept {
     const HRESULT prime = RenderOneBuffer();
     if (FAILED(prime)) {
         source_ = nullptr;
-        state_.store(WasapiSinkState::Faulted, std::memory_order_release);
+        state_.store(ExclusiveSinkState::Faulted, std::memory_order_release);
         return finish(prime);
     }
 
@@ -243,7 +243,7 @@ HRESULT WasapiExclusiveSink::Start(IIntegerPcmSource& source) noexcept {
         const auto hr = HRESULT_FROM_WIN32(GetLastError());
         RecordError(hr);
         source_ = nullptr;
-        state_.store(WasapiSinkState::Faulted, std::memory_order_release);
+        state_.store(ExclusiveSinkState::Faulted, std::memory_order_release);
         return finish(hr);
     }
 
@@ -256,10 +256,10 @@ HRESULT WasapiExclusiveSink::Start(IIntegerPcmSource& source) noexcept {
         CloseHandle(renderThread_);
         renderThread_ = nullptr;
         source_ = nullptr;
-        state_.store(WasapiSinkState::Faulted, std::memory_order_release);
+        state_.store(ExclusiveSinkState::Faulted, std::memory_order_release);
         return finish(hr);
     }
-    state_.store(WasapiSinkState::Running, std::memory_order_release);
+    state_.store(ExclusiveSinkState::Running, std::memory_order_release);
     return finish(S_OK);
 }
 
@@ -277,7 +277,7 @@ HRESULT WasapiExclusiveSink::RenderOneBuffer() noexcept {
                 const HRESULT stop = client_->Stop();
                 if (FAILED(stop) && stop != AUDCLNT_E_NOT_INITIALIZED) {
                     RecordError(stop);
-                    state_.store(WasapiSinkState::Faulted, std::memory_order_release);
+                    state_.store(ExclusiveSinkState::Faulted, std::memory_order_release);
                     return stop;
                 }
             }
@@ -326,7 +326,7 @@ HRESULT WasapiExclusiveSink::RenderOneBuffer() noexcept {
             if (FAILED(release)) releaseBufferFailures_.fetch_add(1, std::memory_order_relaxed);
             RecordError(failure);
             stopRequested_.store(true, std::memory_order_release);
-            state_.store(WasapiSinkState::Faulted, std::memory_order_release);
+            state_.store(ExclusiveSinkState::Faulted, std::memory_order_release);
             return failure;
         }
     }
@@ -336,7 +336,7 @@ HRESULT WasapiExclusiveSink::RenderOneBuffer() noexcept {
         releaseBufferFailures_.fetch_add(1, std::memory_order_relaxed);
         RecordError(hr);
         stopRequested_.store(true, std::memory_order_release);
-        state_.store(WasapiSinkState::Faulted, std::memory_order_release);
+        state_.store(ExclusiveSinkState::Faulted, std::memory_order_release);
         return hr;
     }
     submittedFrames_.fetch_add(bufferFrames_, std::memory_order_relaxed);
@@ -431,7 +431,7 @@ DWORD WasapiExclusiveSink::RenderThreadMain() noexcept {
 
     if (FAILED(threadFailure)) {
         RecordError(threadFailure);
-        state_.store(WasapiSinkState::Faulted, std::memory_order_release);
+        state_.store(ExclusiveSinkState::Faulted, std::memory_order_release);
     }
 
     if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
@@ -441,8 +441,8 @@ DWORD WasapiExclusiveSink::RenderThreadMain() noexcept {
 
 void WasapiExclusiveSink::Stop() noexcept {
     const auto current = state_.load(std::memory_order_acquire);
-    if (current != WasapiSinkState::Running && !renderThread_) return;
-    NotifyLifecycle(WasapiSinkLifecycleEvent::StopEnter, S_OK);
+    if (current != ExclusiveSinkState::Running && !renderThread_) return;
+    NotifyLifecycle(ExclusiveSinkLifecycleEvent::StopEnter, S_OK);
     HRESULT lifecycleResult = S_OK;
     stopRequested_.store(true, std::memory_order_release);
     if (shutdownEvent_) SetEvent(shutdownEvent_);
@@ -461,35 +461,35 @@ void WasapiExclusiveSink::Stop() noexcept {
     source_ = nullptr;
     waitingForSource_.store(false, std::memory_order_release);
     resumeBlocked_.store(false, std::memory_order_release);
-    if (client_ && current != WasapiSinkState::Faulted) {
+    if (client_ && current != ExclusiveSinkState::Faulted) {
         const HRESULT reset = client_->Reset();
         if (FAILED(reset) && reset != AUDCLNT_E_NOT_INITIALIZED) {
             RecordError(reset);
             if (SUCCEEDED(lifecycleResult)) lifecycleResult = reset;
         }
     }
-    if (current != WasapiSinkState::Faulted) {
-        state_.store(WasapiSinkState::Open, std::memory_order_release);
+    if (current != ExclusiveSinkState::Faulted) {
+        state_.store(ExclusiveSinkState::Open, std::memory_order_release);
     }
-    NotifyLifecycle(WasapiSinkLifecycleEvent::StopExit, lifecycleResult);
+    NotifyLifecycle(ExclusiveSinkLifecycleEvent::StopExit, lifecycleResult);
 }
 
 void WasapiExclusiveSink::Close() noexcept {
-    if (state_.load(std::memory_order_acquire) == WasapiSinkState::Closed &&
+    if (state_.load(std::memory_order_acquire) == ExclusiveSinkState::Closed &&
         !renderThread_ && !client_ && !render_ && !device_ && !enumerator_ &&
         !shutdownEvent_ && !audioEvent_ && !comInitialized_) {
         return;
     }
-    NotifyLifecycle(WasapiSinkLifecycleEvent::CloseEnter, S_OK);
+    NotifyLifecycle(ExclusiveSinkLifecycleEvent::CloseEnter, S_OK);
     Stop();
     ReleaseInterfaces();
     source_ = nullptr;
-    state_.store(WasapiSinkState::Closed, std::memory_order_release);
+    state_.store(ExclusiveSinkState::Closed, std::memory_order_release);
     if (comInitialized_) {
         CoUninitialize();
         comInitialized_ = false;
     }
-    NotifyLifecycle(WasapiSinkLifecycleEvent::CloseExit,
+    NotifyLifecycle(ExclusiveSinkLifecycleEvent::CloseExit,
                     static_cast<HRESULT>(lastError_.load(std::memory_order_acquire)));
 }
 
@@ -520,13 +520,13 @@ void WasapiExclusiveSink::RecordError(HRESULT error) noexcept {
     if (FAILED(error)) lastError_.store(error, std::memory_order_release);
 }
 
-void WasapiExclusiveSink::NotifyLifecycle(WasapiSinkLifecycleEvent event,
+void WasapiExclusiveSink::NotifyLifecycle(ExclusiveSinkLifecycleEvent event,
                                            HRESULT result) noexcept {
     if (config_.onLifecycle) config_.onLifecycle(config_.lifecycleContext, event, result);
 }
 
-WasapiSinkStats WasapiExclusiveSink::Stats() const noexcept {
-    return WasapiSinkStats{
+ExclusiveSinkStats WasapiExclusiveSink::Stats() const noexcept {
+    return ExclusiveSinkStats{
         submittedFrames_.load(std::memory_order_acquire),
         submittedBuffers_.load(std::memory_order_acquire),
         controlledSilenceFrames_.load(std::memory_order_acquire),

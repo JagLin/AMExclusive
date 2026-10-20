@@ -3016,9 +3016,9 @@ AppleOSStatus __cdecl HookV2AudioUnitUninitialize(void* unit) {
     return result;
 }
 
-const wchar_t* WasapiSinkLifecycleText(
-    ammod::audio_v2::WasapiSinkLifecycleEvent event) noexcept {
-    using Event = ammod::audio_v2::WasapiSinkLifecycleEvent;
+const wchar_t* SinkLifecycleText(
+    ammod::audio_v2::ExclusiveSinkLifecycleEvent event) noexcept {
+    using Event = ammod::audio_v2::ExclusiveSinkLifecycleEvent;
     switch (event) {
     case Event::OpenEnter: return L"OpenEnter";
     case Event::OpenExit: return L"OpenExit";
@@ -3034,9 +3034,9 @@ const wchar_t* WasapiSinkLifecycleText(
     return L"Unknown";
 }
 
-void V2OnSinkLifecycle(void*, ammod::audio_v2::WasapiSinkLifecycleEvent event,
+void V2OnSinkLifecycle(void*, ammod::audio_v2::ExclusiveSinkLifecycleEvent event,
                        HRESULT result) noexcept {
-    Log(L"v2 sink lifecycle event=" + std::wstring(WasapiSinkLifecycleText(event)) +
+    Log(L"v2 sink lifecycle event=" + std::wstring(SinkLifecycleText(event)) +
         L" qpc=" + std::to_wstring(CurrentQpc()) + L" result=" + HResultText(result));
 }
 

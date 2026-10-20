@@ -61,7 +61,7 @@ HRESULT AudioCoreCoordinator::Enable(const AudioCoreCoordinatorConfig& config) n
 
 void AudioCoreCoordinator::Disable() noexcept {
     if (!gate_.UiEnabled() && !queue_ && !source_ && !sourceReadyEvent_ &&
-        sink_.State() == WasapiSinkState::Closed) {
+        sink_->State() == ExclusiveSinkState::Closed) {
         return;
     }
 
@@ -71,8 +71,8 @@ void AudioCoreCoordinator::Disable() noexcept {
     outputGate_.Reset();
     gate_.SetUiEnabled(false);
     if (sourceReadyEvent_) SetEvent(sourceReadyEvent_);
-    sink_.Stop();
-    sink_.Close();
+    sink_->Stop();
+    sink_->Close();
     source_.reset();
     if (queue_) queue_->Clear();
     queue_.reset();
@@ -90,7 +90,7 @@ bool AudioCoreCoordinator::PushResult(bool pushed, std::uint32_t frames) noexcep
         // The producer notification exists only to restart a sink that had to
         // stop for source starvation. Signaling it for every healthy P0 block
         // needlessly wakes the real-time render thread at producer cadence.
-        if (sourceReadyEvent_ && sink_.WaitingForSource()) SetEvent(sourceReadyEvent_);
+        if (sourceReadyEvent_ && sink_->WaitingForSource()) SetEvent(sourceReadyEvent_);
     } else {
         droppedFrames_.fetch_add(frames, std::memory_order_relaxed);
         gate_.Fail(token_);
@@ -133,14 +133,14 @@ HRESULT AudioCoreCoordinator::OpenEndpoint() noexcept {
     if (!queue_ || !source_ || !gate_.CanOpenEndpoint(token_)) return E_UNEXPECTED;
     if (queue_->Size() == 0) return E_PENDING;
 
-    const HRESULT hr = sink_.Open(config_.sink);
+    const HRESULT hr = sink_->Open(config_.sink);
     if (FAILED(hr)) {
         outputGate_.Reset();
         gate_.Fail(token_);
         return hr;
     }
     if (!gate_.MarkPrebuffered(token_)) {
-        sink_.Close();
+        sink_->Close();
         outputGate_.Reset();
         gate_.Fail(token_);
         return E_UNEXPECTED;
@@ -153,16 +153,16 @@ HRESULT AudioCoreCoordinator::Start() noexcept {
         gate_.Phase() != AudioCoreGatePhase::Prebuffered) {
         return E_UNEXPECTED;
     }
-    const HRESULT hr = sink_.Start(*source_);
+    const HRESULT hr = sink_->Start(*source_);
     if (FAILED(hr)) {
         outputGate_.Reset();
-        sink_.Close();
+        sink_->Close();
         gate_.Fail(token_);
         return hr;
     }
     if (!outputGate_.CommitCutover(token_)) {
-        sink_.Stop();
-        sink_.Close();
+        sink_->Stop();
+        sink_->Close();
         outputGate_.Rollback(token_);
         return E_UNEXPECTED;
     }
@@ -171,16 +171,16 @@ HRESULT AudioCoreCoordinator::Start() noexcept {
 
 void AudioCoreCoordinator::PauseEndpoint() noexcept {
     if (gate_.Phase() == AudioCoreGatePhase::Active &&
-        sink_.State() == WasapiSinkState::Running) {
-        sink_.Stop();
+        sink_->State() == ExclusiveSinkState::Running) {
+        sink_->Stop();
     }
 }
 
 HRESULT AudioCoreCoordinator::ResumeEndpoint() noexcept {
     if (!source_ || gate_.Phase() != AudioCoreGatePhase::Active) return E_UNEXPECTED;
-    if (sink_.State() == WasapiSinkState::Running) return S_OK;
-    if (sink_.State() != WasapiSinkState::Open) return E_UNEXPECTED;
-    return sink_.Start(*source_);
+    if (sink_->State() == ExclusiveSinkState::Running) return S_OK;
+    if (sink_->State() != ExclusiveSinkState::Open) return E_UNEXPECTED;
+    return sink_->Start(*source_);
 }
 
 bool AudioCoreCoordinator::ShouldSuppressNative() const noexcept {

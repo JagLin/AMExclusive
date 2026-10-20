@@ -4,7 +4,7 @@
 #include "ExactSampleMapper.h"
 #include "LocalFloatIntegerizer.h"
 #include "PcmQueue.h"
-#include "WasapiExclusiveSink.h"
+#include "ExclusiveSink.h"
 
 #include <cstdint>
 

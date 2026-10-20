@@ -3,7 +3,7 @@
 #include "ApplePcmOutput.h"
 #include "ApplePcmTap.h"
 #include "AudioCoreConverterRegistry.h"
-#include "WasapiExclusiveSink.h"
+#include "ExclusiveSink.h"
 
 #include <audioclient.h>
 #include <windows.h>
@@ -27,7 +27,7 @@ enum class AudioCoreRuntimeEvent : std::uint8_t {
 struct AudioCoreRuntimeCallbacks final {
     void* context{};
     void (*onEvent)(void* context, AudioCoreRuntimeEvent event, HRESULT result) noexcept{};
-    void (*onSinkLifecycle)(void* context, WasapiSinkLifecycleEvent event,
+    void (*onSinkLifecycle)(void* context, ExclusiveSinkLifecycleEvent event,
                             HRESULT result) noexcept{};
     HRESULT (*prepareNativeHandoff)(void* context, void* client) noexcept{};
     void (*finalizeNativeHandoff)(void* context, void* client) noexcept{};
@@ -83,7 +83,7 @@ struct AudioCoreRuntimeStats final {
     std::size_t bufferedFrames{};
     AudioCoreCoordinatorStats coordinator{};
     ApplePcmTapStats tap{};
-    WasapiSinkStats sink{};
+    ExclusiveSinkStats sink{};
     AudioCorePcmFillStats pcmFill{};
 };
 

@@ -187,7 +187,7 @@ void AudioCoreRuntime::OnTransportPlayPause() noexcept {
     if (!UiEnabled()) return;
     std::lock_guard lock(controlMutex_);
     if (coordinator_.Phase() == AudioCoreGatePhase::Active &&
-        coordinator_.SinkState() == WasapiSinkState::Running) {
+        coordinator_.SinkState() == ExclusiveSinkState::Running) {
         userPauseIntent_ = true;
         coordinator_.PauseEndpoint();
         return;
@@ -1112,7 +1112,7 @@ DWORD AudioCoreRuntime::WorkerMain() noexcept {
         {
             std::lock_guard lock(controlMutex_);
             nextDiagnosticTelemetryTick_ = 0;
-            if (graphBound_ && coordinator_.SinkState() == WasapiSinkState::Faulted) {
+            if (graphBound_ && coordinator_.SinkState() == ExclusiveSinkState::Faulted) {
                 HRESULT sinkError = coordinator_.Sink().Stats().lastError;
                 if (SUCCEEDED(sinkError)) sinkError = E_UNEXPECTED;
                 uiEnabled_.store(false, std::memory_order_release);
@@ -1313,7 +1313,7 @@ void AudioCoreRuntime::ExtendSeekQuietPeriodLocked() noexcept {
 void AudioCoreRuntime::TryResumePausedSinkLocked() noexcept {
     if (userPauseIntent_ || seekFence_ || !graphStarted_ || !nativeStarted_ ||
         coordinator_.Phase() != AudioCoreGatePhase::Active ||
-        coordinator_.SinkState() != WasapiSinkState::Open) {
+        coordinator_.SinkState() != ExclusiveSinkState::Open) {
         return;
     }
     const HRESULT resume = coordinator_.ResumeEndpoint();

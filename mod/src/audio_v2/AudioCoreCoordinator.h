@@ -17,7 +17,7 @@
 namespace ammod::audio_v2 {
 
 struct AudioCoreCoordinatorConfig final {
-    WasapiSinkConfig sink{};
+    ExclusiveSinkConfig sink{};
     std::size_t queueCapacity{8};
     std::uint64_t mediaGeneration{1};
     PcmMappingPolicy mappingPolicy{PcmMappingPolicy::ExactSourceInteger};
@@ -69,13 +69,14 @@ public:
     bool IsEnabled() const noexcept { return gate_.UiEnabled(); }
     AudioCoreGatePhase Phase() const noexcept { return gate_.Phase(); }
     const PcmFormat& Format() const noexcept {
-        return sink_.State() == WasapiSinkState::Closed ? config_.sink.format : sink_.Format();
+        return sink_->State() == ExclusiveSinkState::Closed ? config_.sink.format
+                                                             : sink_->Format();
     }
     std::uint64_t MediaGeneration() const noexcept { return config_.mediaGeneration; }
     const AudioCoreCoordinatorStats Stats() const noexcept;
-    const WasapiExclusiveSink& Sink() const noexcept { return sink_; }
-    WasapiSinkState SinkState() const noexcept { return sink_.State(); }
-    void SetSinkResumeBlocked(bool blocked) noexcept { sink_.SetResumeBlocked(blocked); }
+    const IExclusiveSink& Sink() const noexcept { return *sink_; }
+    ExclusiveSinkState SinkState() const noexcept { return sink_->State(); }
+    void SetSinkResumeBlocked(bool blocked) noexcept { sink_->SetResumeBlocked(blocked); }
     std::size_t BufferedBlocks() const noexcept { return queue_ ? queue_->Size() : 0; }
     std::size_t BufferedFrames() const noexcept {
         return queue_ ? queue_->QueuedFrames() : 0;
@@ -89,7 +90,7 @@ public:
         if (sourceReadyEvent_) SetEvent(sourceReadyEvent_);
         return true;
     }
-    bool EndOfStreamSubmitted() const noexcept { return sink_.EndOfStreamSubmitted(); }
+    bool EndOfStreamSubmitted() const noexcept { return sink_->EndOfStreamSubmitted(); }
 
 private:
     bool PushResult(bool pushed, std::uint32_t frames) noexcept;
@@ -101,7 +102,11 @@ private:
     std::unique_ptr<PcmQueue> queue_;
     std::optional<QueuedPcmSource> source_;
     BitPerfectVerifier verifier_{};
-    WasapiExclusiveSink sink_{};
+    // Backends are members rather than heap objects so Enable() stays
+    // allocation-free on the sink side and the pointer can never dangle; the
+    // coordinator is non-copyable, so &wasapiSink_ is stable for its lifetime.
+    WasapiExclusiveSink wasapiSink_{};
+    IExclusiveSink* sink_{&wasapiSink_};
     HANDLE sourceReadyEvent_{};
     std::uint64_t nextSequence_{};
     std::atomic<std::uint64_t> capturedFrames_{};
