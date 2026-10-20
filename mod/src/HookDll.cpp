@@ -233,6 +233,11 @@ thread_local GraphFormatCandidate g_threadGraphFormat;
 std::atomic<void*> g_v2PendingLocalConverter{};
 struct LocalPcmQueue {
     std::mutex mutex;
+    // Serializes DrainV2LocalQueue. Apple's decoder thread, the output-unit
+    // start hook and the runtime's Bound event can all drain the same staging
+    // queue; ACv2's queue is single-producer, and two concurrent drainers
+    // could push popped spans out of order. Order: drainMutex, then mutex.
+    std::mutex drainMutex;
     std::condition_variable spaceAvailable;
     std::vector<BYTE> storage;
     std::size_t readOffset{};
@@ -2055,6 +2060,9 @@ bool DrainV2LocalQueue(void* converter, const std::shared_ptr<LocalPcmQueue>& qu
     if (!converter || !queue || !queue->active || !g_audioCoreRuntime.IsConverterBound(converter)) {
         return false;
     }
+    // Never held while waiting on the runtime: OnPcmOutput is lock-free, so a
+    // drainer blocked here only waits for another drainer's bounded loop.
+    std::lock_guard drainLock(queue->drainMutex);
     thread_local std::array<BYTE, ammod::audio_v2::kMaxBlockFrames * 8u> raw{};
     thread_local std::array<float, ammod::audio_v2::kMaxBlockFrames * 2u> canonical{};
     bool forwarded{};
