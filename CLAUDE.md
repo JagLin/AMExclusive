@@ -38,7 +38,7 @@ cd mod
 | `mod/src/UiAdapter.cpp` | C++/WinRT 走訪 WinUI 視覺樹，在 `PlaybackSettingsPage` 插入開關與 buffer 輸入框；transport 手勢 → `TransportIntent` |
 | `mod/src/HookDll.cpp` | MinHook 安裝點、Broker IPC client、native trace 診斷 |
 | `mod/src/LosslessQualityLock.cpp` | 嚴格 ALAC subtype filter（音質鎖） |
-| `mod/src/audio_v2/` | 獨占輸出核心：registry → tap → queue → mapper → sink，加上 native render gate |
+| `mod/src/audio_v2/` | 獨占輸出核心：registry → tap → queue → mapper → sink（WASAPI 或 ASIO），加上 native render gate |
 | `mod/src/MediaSessionControl.cpp` | SMTC 輔助 exe（`reject-current` / `restart-current`） |
 | `mod/src/SetupInstaller.cpp`、`mod/scripts/` | 單檔安裝程式與 PowerShell 安裝 / 解除安裝 / 排程註冊 |
 
@@ -54,7 +54,9 @@ cd mod
 - **不偽造樣本**：source 不足時回傳 `kAudioSourceWouldBlock`，sink 暫停，不補靜音。只有明確的 end-of-stream 才能送出不足一個 period 的資料。
 - **Generation token**：`AudioCoreGate` 每次切換都遞增 generation，舊 token 立即失效。只有 `CommitCutover`（sink 已 Start 且已 prebuffer）會讓原生輸出被壓掉。
 - **Intent 所有權**：持久化的使用者 intent 由 Broker 擁有。Agent 的 `StatusChanged` / `AttemptFailed` 只能結束當次嘗試，不能清除 intent。
-- 抽象邊界：`IIntegerPcmSource`（`WasapiExclusiveSink.h`）。`AudioCoreCoordinator` 目前直接持有具體型別 `WasapiExclusiveSink sink_`。
+- 抽象邊界：`IIntegerPcmSource` 與 `IExclusiveSink`（`ExclusiveSink.h`）。`AudioCoreCoordinator` 以成員持有 `WasapiExclusiveSink` 與 `AsioSink`，`Enable` 時依輸出後端選用。
+- `AsioSink`：驅動呼叫全在專屬 STA worker（全程 `ScopedNativeProxyBypass`，有些驅動內部自開 WASAPI client）；`bufferSwitch` 不足時只能寫零並計入 `controlledSilenceFrames`。Steinberg SDK 只放本機 `third_party/asiosdk/`（gitignore），沒有 SDK 時編成永遠不可用。
+- pump 的 queue 水位依 sink 實際 period（`IExclusiveSink::BufferFrames`）調整；ASIO 驅動常無視請求的 buffer（JPLAY 依 DAC Link 可到 24576 frames）。
 
 ## IPC
 
@@ -63,7 +65,7 @@ cd mod
 
 ## 設定與日誌（安裝目錄 `%PUBLIC%\AMExclusive`）
 
-- `am-exclusive.ini` 的 `[mod]` 區段：`mode=exclusive|probe`、`period_100ns`（預設 200000，對應 UI 上的 1–100 ms）、`native_trace`（診斷）。新增 ini key 時，要一併更新 `Install-Mod.ps1` 的保留邏輯。
+- `am-exclusive.ini` 的 `[mod]` 區段：`mode=exclusive|probe`、`period_100ns`（預設 200000，對應 UI 上的 1–100 ms）、`native_trace`（診斷）、`output=wasapi|asio`、`asio_driver`（`HKLM\SOFTWARE\ASIO` 下的鍵名）。`output`／`asio_driver` 由 Broker 擁有，UI 設定頁的「输出设备」選單經 IPC 寫入，Agent 只從 status 套用。新增 ini key 時，要一併更新 `Install-Mod.ps1` 的保留邏輯。
 - 日誌：`am-exclusive-broker.log`、`am-exclusive.log`（hook）、`am-exclusive-ui.log`、`am-exclusive-recovery.log`，都用 `BoundedLog.h` 輪替。
 
 ## 程式風格
@@ -76,4 +78,8 @@ cd mod
 
 ## 被 .gitignore 排除的路徑
 
-`/docs/`、`/scripts/`（根目錄）、`/mod/tests/`、`/evidence/`、`/report/`、`/artifacts/`、`third_party/` 下的 PortAudio / PlayPcmWin / mpv 等。要提交的文件不要放進這些目錄。
+`/docs/`、`/scripts/`（根目錄）、`/mod/tests/`、`/evidence/`、`/report/`、`/artifacts/`、`/third_party/asiosdk/`、`third_party/` 下的 PortAudio / PlayPcmWin / mpv 等。要提交的文件不要放進這些目錄。
+
+## 本 fork 的工作紀錄
+
+`notes/<feature>/TRACKING.md` 記錄本 fork 各 feature 的交接、決定（含使用者原話）、未決問題與已知事實。上游沒有 `notes/`，不會與上游衝突；不要改放 `docs/`。接手某個 feature 前先讀它的檔頭交接段。目前：`notes/asio-output/`（ASIO 輸出與輸出裝置選單）。

@@ -1,0 +1,183 @@
+diff --git a/mod/src/HookDll.cpp b/mod/src/HookDll.cpp
+index 5f03de9..c50a87e 100644
+--- a/mod/src/HookDll.cpp
++++ b/mod/src/HookDll.cpp
+@@ -136,6 +136,12 @@ using AudioConverterFillComplexBufferFn = AppleOSStatus(__cdecl*)(
+     void*, AudioConverterComplexInputDataProcFn, void*, std::uint32_t*, void*, void*);
+ using AudioConverterResetFn = AppleOSStatus(__cdecl*)(void*);
+ using AudioConverterDisposeFn = AppleOSStatus(__cdecl*)(void*);
++using AudioConverterConvertBufferFn = AppleOSStatus(__cdecl*)(
++    void*, std::uint32_t, const void*, std::uint32_t*, void*);
++using AudioConverterInputDataProcFn = AppleOSStatus(__cdecl*)(
++    void*, std::uint32_t*, void**, void*);
++using AudioConverterFillBufferFn = AppleOSStatus(__cdecl*)(
++    void*, AudioConverterInputDataProcFn, void*, std::uint32_t*, void*);
+ using AudioUnitSetPropertyFn = AppleOSStatus(__cdecl*)(
+     void*, std::uint32_t, std::uint32_t, std::uint32_t, const void*, std::uint32_t);
+ using AudioOutputUnitStartFn = AppleOSStatus(__cdecl*)(void*);
+@@ -203,6 +209,11 @@ AudioConverterGetPropertyFn g_v2OriginalAudioConverterGetProperty{};
+ AudioConverterFillComplexBufferFn g_v2OriginalAudioConverterFillComplexBuffer{};
+ AudioConverterResetFn g_v2OriginalAudioConverterReset{};
+ AudioConverterDisposeFn g_v2OriginalAudioConverterDispose{};
++AudioConverterConvertBufferFn g_v2OriginalAudioConverterConvertBuffer{};
++AudioConverterFillBufferFn g_v2OriginalAudioConverterFillBuffer{};
++// Diagnostic-only budgets for the observer hooks below.
++std::atomic<int> g_convertBufferLogBudget{40};
++std::atomic<int> g_fillBufferLogBudget{40};
+ AudioUnitSetPropertyFn g_v2OriginalAudioUnitSetProperty{};
+ AudioUnitRenderFn g_v2OriginalAudioUnitRender{};
+ AudioOutputUnitStartFn g_v2OriginalAudioOutputUnitStart{};
+@@ -231,6 +242,9 @@ struct GraphFormatCandidate {
+ };
+ thread_local GraphFormatCandidate g_threadGraphFormat;
+ std::atomic<void*> g_v2PendingLocalConverter{};
++// GetTickCount64() when g_v2PendingLocalConverter was last published; bounds
++// the cross-thread local-graph bind in HookV2AudioOutputUnitStart.
++std::atomic<ULONGLONG> g_v2PendingLocalConverterTick{};
+ struct LocalPcmQueue {
+     std::mutex mutex;
+     std::condition_variable spaceAvailable;
+@@ -1971,6 +1985,7 @@ std::shared_ptr<LocalPcmQueue> CreateV2LocalQueue(
+         std::lock_guard lock(g_converterProbeMutex);
+         g_converterProbes[converter] = {queue};
+     }
++    g_v2PendingLocalConverterTick.store(GetTickCount64(), std::memory_order_release);
+     g_v2PendingLocalConverter.store(converter, std::memory_order_release);
+     Log(L"v2 pre-SRC PCM staging queue created converter=" +
+         std::to_wstring(reinterpret_cast<std::uintptr_t>(converter)) + L" rate=" +
+@@ -2553,6 +2568,51 @@ AppleOSStatus __cdecl HookV2AudioConverterFillComplexBuffer(
+     return result;
+ }
+ 
++// Observer-only: AVCF local-file graphs bind a same-rate LPCM converter that
++// never reaches the FillComplexBuffer capture path. These record whether Apple
++// drives converters through the older entry points; they never alter data.
++AppleOSStatus __cdecl HookV2AudioConverterConvertBuffer(void* converter, std::uint32_t inputSize,
++                                                        const void* input,
++                                                        std::uint32_t* outputSize,
++                                                        void* output) {
++    const auto requested = outputSize ? *outputSize : 0u;
++    const auto result = g_v2OriginalAudioConverterConvertBuffer
++        ? g_v2OriginalAudioConverterConvertBuffer(converter, inputSize, input, outputSize, output)
++        : -1;
++    if (g_convertBufferLogBudget.fetch_sub(1, std::memory_order_relaxed) > 0) {
++        Log(L"diag AudioConverterConvertBuffer converter=" +
++            std::to_wstring(reinterpret_cast<std::uintptr_t>(converter)) +
++            L" localQueue=" + std::to_wstring(FindV2LocalQueue(converter) != nullptr) +
++            L" bound=" + std::to_wstring(g_audioCoreRuntime.IsConverterBound(converter)) +
++            L" inputBytes=" + std::to_wstring(inputSize) +
++            L" outputRequested=" + std::to_wstring(requested) +
++            L" outputWritten=" + std::to_wstring(outputSize ? *outputSize : 0u) +
++            L" result=" + std::to_wstring(result));
++    }
++    return result;
++}
++
++AppleOSStatus __cdecl HookV2AudioConverterFillBuffer(void* converter,
++                                                     AudioConverterInputDataProcFn inputProc,
++                                                     void* inputUserData,
++                                                     std::uint32_t* outputSize, void* output) {
++    const auto requested = outputSize ? *outputSize : 0u;
++    const auto result = g_v2OriginalAudioConverterFillBuffer
++        ? g_v2OriginalAudioConverterFillBuffer(converter, inputProc, inputUserData, outputSize,
++                                               output)
++        : -1;
++    if (g_fillBufferLogBudget.fetch_sub(1, std::memory_order_relaxed) > 0) {
++        Log(L"diag AudioConverterFillBuffer converter=" +
++            std::to_wstring(reinterpret_cast<std::uintptr_t>(converter)) +
++            L" localQueue=" + std::to_wstring(FindV2LocalQueue(converter) != nullptr) +
++            L" bound=" + std::to_wstring(g_audioCoreRuntime.IsConverterBound(converter)) +
++            L" outputRequested=" + std::to_wstring(requested) +
++            L" outputWritten=" + std::to_wstring(outputSize ? *outputSize : 0u) +
++            L" result=" + std::to_wstring(result));
++    }
++    return result;
++}
++
+ AppleOSStatus __cdecl HookV2AudioConverterReset(void* converter) {
+     const auto localQueue = FindV2LocalQueue(converter);
+     bool localSeekReset{};
+@@ -2984,6 +3044,30 @@ AppleOSStatus __cdecl HookV2AudioOutputUnitStart(void* unit) {
+                 std::to_wstring(reinterpret_cast<std::uintptr_t>(g_threadGraphFormat.converter)) +
+                 L" rate=" + std::to_wstring(g_threadGraphFormat.sampleRate) +
+                 L" bits=" + std::to_wstring(g_threadGraphFormat.sourceBitDepth));
++        } else if (!g_audioCoreRuntime.BoundConverter()) {
++            // Apple's AVCF player builds local-file graphs differently: the
++            // output unit is initialized before the Local-P0 converter exists
++            // and is started from another thread ~3 ms after that converter is
++            // created, so neither the AudioUnitInitialize resolution nor the
++            // thread-local identity above sees it. Fall back to the most recent
++            // still-registered local P0 converter, bounded by the same 500 ms
++            // freshness window and only while nothing is bound.
++            void* pending = g_v2PendingLocalConverter.load(std::memory_order_acquire);
++            const ULONGLONG pendingTick =
++                g_v2PendingLocalConverterTick.load(std::memory_order_acquire);
++            std::uint32_t rate{};
++            std::uint32_t channels{};
++            std::uint32_t bits{};
++            std::uint64_t observation{};
++            if (pending && pendingTick != 0 && now >= pendingTick && now - pendingTick <= 500 &&
++                g_audioCoreRuntime.DescribeConverter(pending, rate, channels, bits, observation)) {
++                g_audioCoreRuntime.OnAudioUnitInitialized(unit, pending, rate, channels, bits,
++                                                          observation);
++                Log(L"v2 pre-SRC PCM graph bound cross-thread from AudioOutputUnitStart converter=" +
++                    std::to_wstring(reinterpret_cast<std::uintptr_t>(pending)) +
++                    L" rate=" + std::to_wstring(rate) + L" bits=" + std::to_wstring(bits) +
++                    L" ageMs=" + std::to_wstring(now - pendingTick));
++            }
+         }
+         g_audioCoreRuntime.OnAudioUnitStarted(unit);
+         if (void* bound = g_audioCoreRuntime.BoundConverter()) {
+@@ -3366,6 +3450,13 @@ bool InstallAudioCoreV2Hooks() {
+     const bool converterDispose = installToolbox(
+         "AudioConverterDispose", reinterpret_cast<void*>(&HookV2AudioConverterDispose),
+         g_v2OriginalAudioConverterDispose, L"AudioConverterDispose [v2]");
++    // Diagnostic observers; their absence must not fail core installation.
++    (void)installToolbox(
++        "AudioConverterConvertBuffer", reinterpret_cast<void*>(&HookV2AudioConverterConvertBuffer),
++        g_v2OriginalAudioConverterConvertBuffer, L"AudioConverterConvertBuffer [diag]");
++    (void)installToolbox(
++        "AudioConverterFillBuffer", reinterpret_cast<void*>(&HookV2AudioConverterFillBuffer),
++        g_v2OriginalAudioConverterFillBuffer, L"AudioConverterFillBuffer [diag]");
+ 
+     const bool unitSetProperty = installToolbox(
+         "AudioUnitSetProperty", reinterpret_cast<void*>(&HookV2AudioUnitSetProperty),
+diff --git a/mod/src/audio_v2/AudioCoreRuntime.cpp b/mod/src/audio_v2/AudioCoreRuntime.cpp
+index 583cad6..65c8524 100644
+--- a/mod/src/audio_v2/AudioCoreRuntime.cpp
++++ b/mod/src/audio_v2/AudioCoreRuntime.cpp
+@@ -395,6 +395,19 @@ bool AudioCoreRuntime::IsConverterRegistered(void* converter) const noexcept {
+     return registry_.Snapshot(converter, snapshot);
+ }
+ 
++bool AudioCoreRuntime::DescribeConverter(void* converter, std::uint32_t& sampleRate,
++                                         std::uint32_t& channels,
++                                         std::uint32_t& sourceBitDepth,
++                                         std::uint64_t& observationId) const noexcept {
++    ConverterRegistrationSnapshot snapshot{};
++    if (!converter || !registry_.Snapshot(converter, snapshot)) return false;
++    sampleRate = snapshot.registration.outputFormat.sampleRate;
++    channels = snapshot.registration.outputFormat.channels;
++    sourceBitDepth = snapshot.registration.sourceBitDepth;
++    observationId = snapshot.registration.observationId;
++    return true;
++}
++
+ bool AudioCoreRuntime::IsP0Converter(void* converter) const noexcept {
+     ConverterRegistrationSnapshot snapshot{};
+     if (!converter || !registry_.Snapshot(converter, snapshot)) return false;
+diff --git a/mod/src/audio_v2/AudioCoreRuntime.h b/mod/src/audio_v2/AudioCoreRuntime.h
+index 67cf1ce..ae2027e 100644
+--- a/mod/src/audio_v2/AudioCoreRuntime.h
++++ b/mod/src/audio_v2/AudioCoreRuntime.h
+@@ -190,6 +190,10 @@ public:
+     void* BoundConverter() const noexcept {
+         return boundConverter_.load(std::memory_order_acquire);
+     }
++    // Registered capture format of a P0 converter; false when not registered.
++    bool DescribeConverter(void* converter, std::uint32_t& sampleRate,
++                           std::uint32_t& channels, std::uint32_t& sourceBitDepth,
++                           std::uint64_t& observationId) const noexcept;
+ 
+     // Called from the native ReleaseBuffer detour. It is a pure atomic query.
+     bool ShouldSuppressNative(void* client) const noexcept;
