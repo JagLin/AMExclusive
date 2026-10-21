@@ -459,19 +459,41 @@ DWORD WINAPI ProcessWatcher(void*) {
     DWORD boundHostPid{};
     HANDLE boundHostProcess{};
     const ULONGLONG bindDeadline = GetTickCount64() + 3000ULL;
+    // A launch can start two AppleMusic.exe at once; one hands off to the
+    // other and exits within seconds. The survivor's own companion launch
+    // loses the single-instance mutex to this one, so exiting with the
+    // short-lived host left the real host uninjected and the Agent runtime
+    // retired. Follow a remaining host instead; exit only when none is left.
+    const auto rebindOrExit = [&](const wchar_t* reason) {
+        const DWORD previousPid = boundHostPid;
+        CloseHandle(boundHostProcess);
+        boundHostProcess = nullptr;
+        boundHostPid = 0;
+        for (DWORD pid : FindProcesses(L"AppleMusic.exe")) {
+            if (pid == previousPid || !IsAppleMusicProcess(pid)) continue;
+            HANDLE host = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                                      FALSE, pid);
+            if (!host) continue;
+            if (WaitForSingleObject(host, 0) != WAIT_TIMEOUT) {
+                CloseHandle(host);
+                continue;
+            }
+            boundHostPid = pid;
+            boundHostProcess = host;
+            Log(L"companion rebound: AppleMusic host " + std::wstring(reason) + L" pid=" +
+                std::to_wstring(previousPid) + L"; following pid=" + std::to_wstring(pid));
+            return true;
+        }
+        Log(L"companion exit: bound AppleMusic host " + std::wstring(reason) + L" pid=" +
+            std::to_wstring(previousPid));
+        g_shutdown.store(true);
+        return false;
+    };
     while (!g_shutdown.load()) {
         if (boundHostProcess) {
             const DWORD hostState = WaitForSingleObject(boundHostProcess, 0);
-            if (hostState == WAIT_OBJECT_0) {
-                Log(L"companion exit: bound AppleMusic host terminated pid=" +
-                    std::to_wstring(boundHostPid));
-                g_shutdown.store(true);
-                break;
-            }
-            if (hostState == WAIT_FAILED) {
-                Log(L"companion exit: bound AppleMusic host wait failed pid=" +
-                    std::to_wstring(boundHostPid));
-                g_shutdown.store(true);
+            if ((hostState == WAIT_OBJECT_0 || hostState == WAIT_FAILED) &&
+                !rebindOrExit(hostState == WAIT_OBJECT_0 ? L"terminated" : L"wait failed")) {
                 break;
             }
         }
@@ -545,16 +567,8 @@ DWORD WINAPI ProcessWatcher(void*) {
 
         if (boundHostProcess) {
             const DWORD wait = WaitForSingleObject(boundHostProcess, watcherDelayMs);
-            if (wait == WAIT_OBJECT_0) {
-                Log(L"companion exit: bound AppleMusic host terminated pid=" +
-                    std::to_wstring(boundHostPid));
-                g_shutdown.store(true);
-                break;
-            }
-            if (wait == WAIT_FAILED) {
-                Log(L"companion exit: bound AppleMusic host wait failed pid=" +
-                    std::to_wstring(boundHostPid));
-                g_shutdown.store(true);
+            if ((wait == WAIT_OBJECT_0 || wait == WAIT_FAILED) &&
+                !rebindOrExit(wait == WAIT_OBJECT_0 ? L"terminated" : L"wait failed")) {
                 break;
             }
         } else {

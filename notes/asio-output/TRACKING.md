@@ -98,6 +98,12 @@
   - source wait 時讓 ASIO driver 繼續跑、補零。這會插入靜音，而且仍會少約 0.5 秒。
 - 狀態：已 commit 並 push（2026-10-22，commit 標題「fix(audio_v2): stage successor P0 while the previous track drains」），待 Win10 實測（OQ-12）。log 驗證點：`v2 sink runtime successor stage armed` 與 `... replayed stagedFrames=… replayedFrames=…`。
 
+### ADR-16 broker 綁定的 Apple Music 結束時改綁仍在的程序
+- 決定：`Broker.cpp` 的 `ProcessWatcher` 偵測到綁定的 `AppleMusic.exe` 結束（或 wait 失敗）時，先找其他仍在執行的 `AppleMusic.exe`，找到就改綁並記 `companion rebound`；只有找不到時才照原本的方式退出。UI 注入會在下一輪自動補到新的程序上。
+- 使用者原話：「修 broker 綁到短命 AppleMusic.exe 就退出的問題：綁定的程序結束時，如果還有其他 AppleMusic.exe 就改綁而不是退出。」
+- 依據：F-40。
+- 狀態：已 commit 並 push（2026-10-22，commit 標題「fix(broker): follow a surviving AppleMusic.exe instead of exiting」），本機已安裝，使用者初步使用正常；改綁路徑本身還沒在 log 中觸發過。
+
 ## §2 Open Questions
 
 | ID | 問題 | 開立 |
@@ -126,11 +132,12 @@
 - 版本與相容性：F-3、F-4、F-26、F-27、F-28
 - 驅動與硬體：F-5、F-6、F-7、F-8
 - WASAPI baseline：F-9
-- 原生輸出與 AVCF：F-12、F-13、F-14、F-15、F-16、F-17、F-18、F-19、F-20
+- 原生輸出與 AVCF：F-12、F-13、F-14、F-15、F-16、F-17、F-18、F-19、F-20、F-39
 - 暫停／恢復：F-10、F-11、F-21、F-22、F-23
 - 緩衝：F-24、F-25
 - 串流換曲：F-35、F-36、F-37、F-38
 - 安裝：F-28、F-30
+- 程序生命週期：F-40
 - 外部資訊與參考：F-31、F-32、F-33
 - 使用者偏好：F-34
 
@@ -263,7 +270,7 @@ Git Bash 的 `sed -i`／`perl -pi` 會把 CRLF 原始碼改成 LF（本 repo 為
 - 發現脈絡：搜尋 AVCF 討論時掃上游 fork。
 
 ### F-33 commit 清單
-`53ee205` IExclusiveSink、`c32a1da` gitignore SDK、`1eddee7`／`d059b23` 合併上游 `c67c2f3`、`d6152f7` ASIO、`c1751b7` 暫停修正、`857463b` 搬移鎖、`cf9ba62` 輸出裝置選單、`db7217d` pump 水位、`09893bc` 工作紀錄、`5541739` 換曲少音紀錄、successor stage 修正（ADR-15）。皆已 push 到 origin。
+`53ee205` IExclusiveSink、`c32a1da` gitignore SDK、`1eddee7`／`d059b23` 合併上游 `c67c2f3`、`d6152f7` ASIO、`c1751b7` 暫停修正、`857463b` 搬移鎖、`cf9ba62` 輸出裝置選單、`db7217d` pump 水位、`09893bc` 工作紀錄、`5541739` 換曲少音紀錄、successor stage 修正（ADR-15）、README 更新、broker 改綁（ADR-16）。皆已 push 到 origin。
 - 發現脈絡：收尾整理。
 
 ### F-34 使用者偏好
@@ -294,3 +301,22 @@ Win10 log（`am-exclusive(1).log`，pid 3968）00:44:49 這次 48k→44.1k 換�
 ### F-38 JPLAY 在 Win10 的 `start()` 約 3 秒
 同一 log 裡 `StartEnter`→`StartExit`：00:37:16.214→19.388（3.17 秒）、00:44:54.733→57.681（2.95 秒）。本機約 150 ms（F-7）。換曲重開 sink 時這段 queue 會持續累積，不會掉資料；但只要有東西在等 driver 重啟（例如 F-37），就會被拖住。
 - 發現脈絡：分析 F-37 時量到。
+
+### F-39 「已有音量平衡資料」不足以觸發 AVCF（F-20 條件不完整）
+本機 Win11、`8a13e22`、JPLAY 8192 frames，使用者表示音量平衡設定是關的：
+- 「12. My Soul,Your Beats!」（WAV 16-bit／44.1 kHz）在 02:22、02:23 走 AVCF（384000 Hz converter）沒有聲音；第二次 Apple 連解碼器都沒建立。
+- 02:27 重新匯入（歌曲資訊的「加入日期」為 2026-10-22 2:27）。之後 02:28、02:29、02:30、02:33 共四次播放，其中三次是新的 agent 程序，全部走一般路徑（`staging queue created` → `bound active` → `exclusive sink active`），沒有 384000。
+- 這時歌曲資訊「檔案」分頁已顯示 `音量 -6.5 dB`。這個欄位就是使用者先前注意到的音量平衡值（F-19）。也就是說，資料已經存在，音量平衡也是關的，卻沒有走 AVCF。F-20 的「已有資料 + 關閉 → AVCF」不是充分條件；重新匯入後要怎樣才會再切到 AVCF，仍未知。
+- 歌曲資訊「選項」分頁的「音量調整」滑桿（每首歌各自的增益，中間是 0%、最右是 +100%）：使用者觀察到「拉到最大能播」，拉到 0% 也能播。所以滑桿位置不是開關（負向事實）。模型推測（假設，未驗證）：按「確定」會重寫資料庫紀錄，效果可能跟重新匯入一樣，會把路徑重置回一般路徑。
+- 使用者原話：「如果音樂庫裡面單曲的音量平衡是最大 好像就算關掉設定的音量平衡也能正常撥放」、「拉到中間是0% 奇怪 然後又能播了」。
+- 發現脈絡：使用者回報 Win11 本機「好像不能撥放了」，2026-10-22。
+
+### F-40 同時啟動兩個 AppleMusic.exe 時，broker 綁到短命的那個並退出
+本機 Win11 02:43:05 同時出現 `AppleMusic.exe` pid 76724 與 68092：
+- broker 先掃到 76724 就綁上，也只對它注入 UI。
+- 02:43:10 76724 結束；broker 依「綁定的程序結束就退出」的規則跟著退出。agent（37044）因此記 `broker IPC disconnected; local runtime retired`。
+- 之後 Apple 在 68092／37044 上正常播放，但 mod 完全沒接手：telemetry 一直是 `capturedFrames=0`，聲音走 Apple 自己的輸出。
+- 存活的 68092 自己觸發的那次 broker 啟動，因為單一實例 mutex（`Local\AMExclusive.Broker.<SID>`）已被前一個 broker 持有，直接 return 0，所以沒有人接手它。
+- 這段綁定邏輯沿用上游，跟 ASIO 無關。之前「點封面後沒正常啟動獨佔，關掉 Apple Music 重開就好」那次，可能也是同一個原因（未確認）。
+- 修正見 ADR-16。
+- 發現脈絡：使用者回報「現在的撥放似乎攔截失敗」，2026-10-22。
