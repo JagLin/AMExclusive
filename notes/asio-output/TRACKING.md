@@ -1,7 +1,7 @@
 # TRACKING — asio-output（feat/asio-output）
 
-**交接（2026-10-21）**：ASIO 輸出已上線並 push（branch `feat/asio-output` = origin，HEAD `db7217d`），本機與 Win10 都能用；GUAC32、JPLAY 實機出聲，Win10 串流 48k/24-bit 長播無斷音。設定頁有輸出裝置選單。進入暫時收尾。
-- 先讀：ADR-8、ADR-9、ADR-10、OQ-1、OQ-2、F-20、F-25
+**交接（2026-10-21）**：ASIO 輸出已上線並 push（branch `feat/asio-output` = origin，HEAD `db7217d`），本機與 Win10 都能用；GUAC32、JPLAY 實機出聲，Win10 串流 48k/24-bit 長播無斷音。設定頁有輸出裝置選單。進入暫時收尾。現在卡在 Win10 串流換曲偶爾少第一個音：mod 層計數無遺失，等使用者做 A/B/C 對照再定方向。
+- 先讀：OQ-12、F-35、F-36，其次 ADR-8、ADR-9、ADR-10、OQ-1、OQ-2、F-20、F-25
 - 別再撿：F-14（AVCF 不是佇列／重複觸發）、F-16（ConvertBuffer／FillBuffer 沒被用）、F-6（Agent 不是 AppContainer）、F-17（公開 API 拿不到 AVCF 的 pre-SRC PCM）
 - 線上 living doc（同一段歷史的人讀版）：F-31
 
@@ -103,6 +103,7 @@
 | OQ-9 | 未做逐樣本 bit-perfect 比對（`BitPerfectVerifier` 只在 deep diagnostics 啟用）。 | 2026-10-21 |
 | OQ-10 | 串流驗證完整後是否對上游開 PR。 | 2026-10-21 |
 | OQ-11 | `mod\build\dist\AMExclusive-Setup.exe` 仍是上游舊版（03:16），未重跑 `Build-Mod.ps1`（F-28）。 | 2026-10-21 |
+| OQ-12 | Win10 串流連續播放時，自然換曲的第一個音偶爾消失（F-35、F-36），掉在哪一層未定。使用者「改天再測試」。待做對照：同一組相鄰曲目、各設定多試幾次——A 關閉獨占、B 獨占＋WASAPI、C 獨占＋JPLAY。A 也掉 → Apple 無縫播放本身；B 掉 A 不掉 → Apple 或 mod，下一步加診斷把換曲前後幾秒的實際輸出寫成 WAV 比對波形；只有 C 掉 → JPLAY 引擎。可另開 `native_trace=true`（手動加進 ini）並記下出問題的換曲時間或曲名，對照沒問題的換曲。 | 2026-10-21 |
 
 ## §3 方法論
 
@@ -118,6 +119,7 @@
 - 原生輸出與 AVCF：F-12、F-13、F-14、F-15、F-16、F-17、F-18、F-19、F-20
 - 暫停／恢復：F-10、F-11、F-21、F-22、F-23
 - 緩衝：F-24、F-25
+- 串流換曲：F-35、F-36
 - 安裝：F-28、F-30
 - 外部資訊與參考：F-31、F-32、F-33
 - 使用者偏好：F-34
@@ -251,7 +253,7 @@ Git Bash 的 `sed -i`／`perl -pi` 會把 CRLF 原始碼改成 LF（本 repo 為
 - 發現脈絡：搜尋 AVCF 討論時掃上游 fork。
 
 ### F-33 commit 清單
-`53ee205` IExclusiveSink、`c32a1da` gitignore SDK、`1eddee7`／`d059b23` 合併上游 `c67c2f3`、`d6152f7` ASIO、`c1751b7` 暫停修正、`857463b` 搬移鎖、`cf9ba62` 輸出裝置選單、`db7217d` pump 水位。皆已 push 到 origin。
+`53ee205` IExclusiveSink、`c32a1da` gitignore SDK、`1eddee7`／`d059b23` 合併上游 `c67c2f3`、`d6152f7` ASIO、`c1751b7` 暫停修正、`857463b` 搬移鎖、`cf9ba62` 輸出裝置選單、`db7217d` pump 水位、`09893bc` 工作紀錄。皆已 push 到 origin。
 - 發現脈絡：收尾整理。
 
 ### F-34 使用者偏好
@@ -259,3 +261,11 @@ Git Bash 的 `sed -i`／`perl -pi` 會把 CRLF 原始碼改成 LF（本 repo 為
 - open questions 要「一個一個處理」、白話解說。
 - 本機音樂用 foobar／JPLAY，Apple Music 主要為串流。
 - 發現脈絡：session 中使用者指示。
+
+### F-35 串流自然換曲時 mod 沒有丟資料
+Win10 log（pid 3968，`db7217d`，JPLAY 24576 frames）三次自然換曲（23:59:43、00:03:36、00:07:14）：Apple 沿用同一個 decoder converter（4279），每次先記 `v2 streaming producer EOF candidate converter=4279 accepted=1`，下一個非零 P0 callback 取消候選、新曲接在尾段後；約 1.6–2.2 秒後才出現下一曲的 `AVCFPlayerItemSetPreferredMaximumAudioSampleRate`／`FigAlternateEligibleLosslessAudioFilterCreate`。換曲前後每 5 秒 `capturedFrames` 與 `acceptedFrames` 同步增加 240,832，capture 層 reject、`droppedFrames`、`sourceWaits`、`underruns` 全為 0，`controlledSilenceFrames` 停在啟動時的 24576；換曲附近沒有 reset／discontinuity log。計數只證明數量連續，不證明內容（順序、對齊）正確。
+- 發現脈絡：使用者回報「曲目自然切換的第一秒會消失」後比對 log。
+
+### F-36 換曲的第一個音是真的消失，不是延遲（負向事實）
+「只是延遲／被大 buffer 推後」的假設不成立。使用者實聽：「I listened: the first note at a track change really is missing, not just late.」並補充「但好像不是每次都會發生」。
+- 發現脈絡：模型先提延遲假設，使用者實測否決，2026-10-21。
