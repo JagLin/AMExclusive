@@ -52,6 +52,58 @@ bool WriteHardwareBufferMs(std::uint32_t milliseconds) {
 
 using namespace ammod::ipc;
 
+struct OutputSetting {
+    OutputBackend backend{OutputBackend::Wasapi};
+    std::wstring asioDriver;
+};
+
+// output=asio without a driver name cannot be honoured, so it reads as WASAPI.
+OutputSetting ReadOutputSetting() {
+    const auto path = BrokerIniPath();
+    wchar_t output[16]{};
+    GetPrivateProfileStringW(L"mod", L"output", L"wasapi", output,
+        static_cast<DWORD>(std::size(output)), path.c_str());
+    wchar_t driver[kOutputDeviceChars]{};
+    GetPrivateProfileStringW(L"mod", L"asio_driver", L"", driver,
+        static_cast<DWORD>(std::size(driver)), path.c_str());
+    OutputSetting setting{};
+    setting.asioDriver = driver;
+    if (_wcsicmp(output, L"asio") == 0 && !setting.asioDriver.empty()) {
+        setting.backend = OutputBackend::Asio;
+    }
+    return setting;
+}
+
+bool IsRegisteredAsioDriver(const std::wstring& name) {
+    if (name.empty() || name.size() >= kOutputDeviceChars) return false;
+    const std::wstring key = L"SOFTWARE\\ASIO\\" + name;
+    return RegGetValueW(HKEY_LOCAL_MACHINE, key.c_str(), L"CLSID", RRF_RT_REG_SZ,
+                        nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+}
+
+// Selecting WASAPI leaves asio_driver untouched so the last ASIO choice is
+// remembered for the UI and for switching back.
+bool WriteOutputSetting(OutputBackend backend, const std::wstring& asioDriver) {
+    const auto path = BrokerIniPath();
+    const bool asio = backend == OutputBackend::Asio;
+    if (!WritePrivateProfileStringW(L"mod", L"output", asio ? L"asio" : L"wasapi",
+                                    path.c_str())) {
+        return false;
+    }
+    if (asio && !WritePrivateProfileStringW(L"mod", L"asio_driver", asioDriver.c_str(),
+                                            path.c_str())) {
+        return false;
+    }
+    (void)WritePrivateProfileStringW(nullptr, nullptr, nullptr, path.c_str());
+    const auto saved = ReadOutputSetting();
+    return saved.backend == backend && (!asio || saved.asioDriver == asioDriver);
+}
+
+void ApplyOutputSetting(Message& status, const OutputSetting& setting) {
+    status.outputBackend = setting.backend;
+    wcsncpy_s(status.outputDevice, setting.asioDriver.c_str(), _TRUNCATE);
+}
+
 struct Client {
     HANDLE pipe{};
     Role role{Role::Unknown};
@@ -192,6 +244,15 @@ void ShowErrorDialogAsync(ErrorCategory error, HRESULT result,
         case ErrorCategory::BitPerfectFormatUnavailable:
             reason = chinese ? L"DAC 不支持当前音源格式。"
                              : L"The DAC does not support the current source format.";
+            break;
+        case ErrorCategory::AsioDriverUnavailable:
+            reason = chinese ? L"所选的 ASIO 驱动无法启动，请确认驱动已安装且未被其他程序占用。"
+                             : L"The selected ASIO driver could not start. Check that it is "
+                               L"installed and not in use by another app.";
+            break;
+        case ErrorCategory::AsioDriverReset:
+            reason = chinese ? L"ASIO 驱动要求重置，将在下一首歌重新载入。"
+                             : L"The ASIO driver requested a reset; it reloads on the next track.";
             break;
         case ErrorCategory::FormatUnsupported:
             reason = chinese ? L"声卡驱动拒绝了当前独占格式。"
@@ -675,11 +736,38 @@ void HandleMessage(const Message& incoming, HANDLE source) {
                         std::to_wstring(GetLastError()));
                 }
             }
+        } else if (incoming.type == MessageType::SetOutputDevice &&
+                   (incoming.role == Role::Ui || incoming.role == Role::Controller)) {
+            wchar_t driver[kOutputDeviceChars]{};
+            wcsncpy_s(driver, incoming.outputDevice, _TRUNCATE);
+            OutputSetting requested{};
+            requested.backend = incoming.outputBackend == OutputBackend::Asio
+                ? OutputBackend::Asio : OutputBackend::Wasapi;
+            requested.asioDriver = requested.backend == OutputBackend::Asio
+                ? std::wstring(driver) : std::wstring(g_status.outputDevice);
+            if (requested.backend == OutputBackend::Asio &&
+                !IsRegisteredAsioDriver(requested.asioDriver)) {
+                Log(L"output device rejected: ASIO driver not registered name=" +
+                    requested.asioDriver);
+            } else if (WriteOutputSetting(requested.backend, requested.asioDriver)) {
+                g_status.generation++;
+                ApplyOutputSetting(g_status, requested);
+                g_status.error = ErrorCategory::None;
+                g_status.hresult = S_OK;
+                Log(L"output device persisted backend=" +
+                    std::wstring(requested.backend == OutputBackend::Asio ? L"asio" : L"wasapi") +
+                    L" asioDriver=" + requested.asioDriver);
+            } else {
+                Log(L"output device persistence failed error=" + std::to_wstring(GetLastError()));
+            }
         } else if (incoming.type == MessageType::StatusChanged) {
             const auto generation = std::max(g_status.generation + 1, incoming.generation);
             const auto persistedIntent = g_status.enabledIntent;
             const auto persistedHardwareBufferMs = g_status.hardwareBufferMs;
+            const OutputSetting persistedOutput{g_status.outputBackend, g_status.outputDevice};
             g_status = incoming;
+            // The output selection is Broker-owned whoever reports status.
+            ApplyOutputSetting(g_status, persistedOutput);
             g_status.type = MessageType::StatusChanged;
             g_status.role = Role::Broker;
             g_status.generation = generation;
@@ -698,7 +786,9 @@ void HandleMessage(const Message& incoming, HANDLE source) {
             const auto generation = std::max(g_status.generation + 1, incoming.generation);
             const auto persistedIntent = g_status.enabledIntent;
             const auto persistedHardwareBufferMs = g_status.hardwareBufferMs;
+            const OutputSetting persistedOutput{g_status.outputBackend, g_status.outputDevice};
             g_status = incoming;
+            ApplyOutputSetting(g_status, persistedOutput);
             g_status.type = MessageType::StatusChanged;
             g_status.role = Role::Broker;
             g_status.generation = generation;
@@ -817,10 +907,13 @@ int wmain() {
         static_cast<DWORD>(std::size(savedMode)), BrokerIniPath().c_str());
     g_status.enabledIntent = _wcsicmp(savedMode, L"exclusive") == 0 ? 1 : 0;
     g_status.hardwareBufferMs = ReadHardwareBufferMs();
+    ApplyOutputSetting(g_status, ReadOutputSetting());
     g_status.state = g_status.enabledIntent ? RuntimeState::WaitingForStream : RuntimeState::Off;
     Log(L"companion started pid=" + std::to_wstring(GetCurrentProcessId()) +
         L" persistedIntent=" + std::to_wstring(g_status.enabledIntent) +
-        L" hardwareBufferMs=" + std::to_wstring(g_status.hardwareBufferMs));
+        L" hardwareBufferMs=" + std::to_wstring(g_status.hardwareBufferMs) +
+        L" output=" + std::wstring(g_status.outputBackend == OutputBackend::Asio ? L"asio" : L"wasapi") +
+        L" asioDriver=" + std::wstring(g_status.outputDevice));
     const auto pipeName = PipeName();
     PipeSecurity security;
     if (pipeName.empty() || !security.IsValid()) {

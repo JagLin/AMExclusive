@@ -11,12 +11,13 @@
 namespace ammod::ipc {
 
 inline constexpr std::uint32_t kMagic = 0x50494D41; // "AMIP" little-endian
-inline constexpr std::uint16_t kProtocolMajor = 2;
+inline constexpr std::uint16_t kProtocolMajor = 3;
 inline constexpr std::uint16_t kProtocolMinor = 0;
 inline constexpr std::size_t kEndpointIdChars = 256;
 inline constexpr std::size_t kEndpointNameChars = 128;
 inline constexpr std::size_t kFormatChars = 160;
 inline constexpr std::size_t kDetailChars = 256;
+inline constexpr std::size_t kOutputDeviceChars = 64;
 
 enum class Role : std::uint16_t {
     Unknown = 0,
@@ -42,6 +43,15 @@ enum class MessageType : std::uint16_t {
     // `generation` carries the seek gesture epoch.
     TransportIntent = 9,
     SetHardwareBuffer = 10,
+    // UI output-device selection. Like the hardware buffer it is persisted by
+    // the Broker and applies from the next generation; the current song keeps
+    // its sink. Carried in outputBackend/outputDevice.
+    SetOutputDevice = 11,
+};
+
+enum class OutputBackend : std::uint8_t {
+    Wasapi = 0,
+    Asio = 1,
 };
 
 enum class RuntimeState : std::uint16_t {
@@ -81,6 +91,8 @@ enum class ErrorCategory : std::uint16_t {
     Internal,
     UnsupportedLocalInt32,
     BitPerfectFormatUnavailable,
+    AsioDriverUnavailable,
+    AsioDriverReset,
 };
 
 #pragma pack(push, 1)
@@ -102,11 +114,16 @@ struct Message {
     HRESULT hresult{S_OK};
     std::uint32_t hardwareBufferMs{20};
     std::uint8_t enabledIntent{};
-    std::uint8_t reserved[7]{};
+    // Broker-owned output selection (OutputBackend). outputDevice is the ASIO
+    // driver key under HKLM\SOFTWARE\ASIO; it is kept while WASAPI is selected
+    // so switching back restores the last driver.
+    OutputBackend outputBackend{OutputBackend::Wasapi};
+    std::uint8_t reserved[6]{};
     wchar_t endpointId[kEndpointIdChars]{};
     wchar_t endpointName[kEndpointNameChars]{};
     wchar_t format[kFormatChars]{};
     wchar_t detail[kDetailChars]{};
+    wchar_t outputDevice[kOutputDeviceChars]{};
 };
 #pragma pack(pop)
 
@@ -126,6 +143,8 @@ inline ErrorCategory CategorizeAudioError(HRESULT hr) noexcept {
         return ErrorCategory::UnsupportedLocalInt32;
     case ammod::audio::kBitPerfectFormatUnavailable:
         return ErrorCategory::BitPerfectFormatUnavailable;
+    case ammod::audio::kAsioDriverUnavailable: return ErrorCategory::AsioDriverUnavailable;
+    case ammod::audio::kAsioDriverReset: return ErrorCategory::AsioDriverReset;
     case AUDCLNT_E_UNSUPPORTED_FORMAT: return ErrorCategory::FormatUnsupported;
     case AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED: return ErrorCategory::ExclusiveNotAllowed;
     case AUDCLNT_E_DEVICE_IN_USE: return ErrorCategory::DeviceInUse;

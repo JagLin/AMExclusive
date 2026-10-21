@@ -3052,22 +3052,25 @@ void V2OnSinkDiagnostic(void*, const wchar_t* text) noexcept {
     Log(L"v2 sink " + std::wstring(text ? text : L""));
 }
 
-// output=asio routes the exclusive stream to the ASIO driver named by
-// asio_driver (its HKLM\SOFTWARE\ASIO key). Anything else keeps WASAPI.
-void ConfigureOutputBackend() {
-    std::wstring output = ReadSetting(L"output", L"wasapi");
-    std::transform(output.begin(), output.end(), output.begin(), towlower);
-    if (output != L"asio") {
-        Log(L"output backend=wasapi");
-        return;
-    }
-    const std::wstring driver = ReadSetting(L"asio_driver", L"");
-    if (driver.empty()) {
-        Log(L"output=asio requested without asio_driver; keeping wasapi");
-        return;
-    }
-    g_audioCoreRuntime.SetOutputBackend(ammod::audio_v2::ExclusiveSinkBackend::Asio, driver);
-    Log(L"output backend=asio driver=" + driver);
+// The output selection is Broker-owned (it persists output/asio_driver in the
+// ini) and arrives with every status message. Like the hardware buffer it
+// applies from the next generation. Called only from the broker IPC thread.
+void ApplyOutputBackendFromStatus(const ammod::ipc::Message& status) {
+    static bool applied{};
+    static bool appliedAsio{};
+    static std::wstring appliedDriver;
+    wchar_t driver[ammod::ipc::kOutputDeviceChars]{};
+    wcsncpy_s(driver, status.outputDevice, _TRUNCATE);
+    const bool asio = status.outputBackend == ammod::ipc::OutputBackend::Asio && driver[0];
+    const std::wstring name = asio ? std::wstring(driver) : std::wstring();
+    if (applied && asio == appliedAsio && name == appliedDriver) return;
+    g_audioCoreRuntime.SetOutputBackend(asio ? ammod::audio_v2::ExclusiveSinkBackend::Asio
+                                             : ammod::audio_v2::ExclusiveSinkBackend::Wasapi,
+                                        name);
+    applied = true;
+    appliedAsio = asio;
+    appliedDriver = name;
+    Log(asio ? L"output backend=asio driver=" + name : std::wstring(L"output backend=wasapi"));
 }
 
 void V2OnNativeInitialize(void* context, void* client, const wchar_t* endpoint,
@@ -3494,6 +3497,7 @@ DWORD WINAPI PipeClientLoop(void*) {
                 const auto hardwareBufferMs = incoming.hardwareBufferMs
                     ? incoming.hardwareBufferMs : 20u;
                 g_audioCoreRuntime.SetHardwareBufferMilliseconds(hardwareBufferMs);
+                ApplyOutputBackendFromStatus(incoming);
                 g_ipcEnabled.store(enabled, std::memory_order_release);
                 if (!enabled) g_nativeP0Puller.DisableForUiOff();
                 g_audioCoreGate.SetUiEnabled(enabled);
@@ -3566,7 +3570,6 @@ DWORD WINAPI InitializeHooks(void*) {
         &V2ResumeNativeAfterFailedHandoff, &V2PrepareNativeGraphHandoff,
         &V2ResumeNativeGraphAfterFailedHandoff, kNativeAcquisitionPassthrough,
         g_nativeTraceEnabled.load(std::memory_order_acquire), &V2OnSinkDiagnostic};
-    ConfigureOutputBackend();
     if (!g_audioCoreRuntime.Start(runtimeCallbacks)) {
         Log(L"audio core v2 runtime worker failed to start; core remains fail-closed");
     }
