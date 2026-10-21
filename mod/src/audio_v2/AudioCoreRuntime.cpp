@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace ammod::audio_v2 {
 namespace {
@@ -22,6 +23,14 @@ constexpr std::uint32_t kReferenceTimePerSecond = 10000000u;
 // could mark the generation prebuffered. Keep enough bounded storage for the
 // observed cold-start burst without making the decoder callback wait.
 constexpr std::size_t kProductionQueueCapacity = 256;
+// Eight seconds at 192 kHz (~12 MB of float32 stereo) covers a ~3 s endpoint
+// restart plus its terminal tail with margin. Higher rates get proportionally
+// less and fall back to live-only capture on overflow.
+constexpr std::uint64_t kSuccessorStageFrames = 192000ull * 8u;
+// Same headroom the local staging drain leaves in the fixed-capacity queue.
+constexpr std::size_t kSuccessorReplayBlockLimit = kProductionQueueCapacity - 16u;
+constexpr std::uint32_t kSuccessorStageReplayed = 1;
+constexpr std::uint32_t kSuccessorStageDiscarded = 2;
 
 bool IsLossyAacFormat(std::uint32_t formatId) noexcept {
     return formatId == kQaac;
@@ -198,6 +207,9 @@ void AudioCoreRuntime::SetOutputBackend(ExclusiveSinkBackend backend,
 void AudioCoreRuntime::OnTransportPlayPause() noexcept {
     if (!UiEnabled()) return;
     std::lock_guard lock(controlMutex_);
+    // Apple's resume position for an unbound successor is not known here;
+    // fall back to live capture rather than risk replaying audio twice.
+    DiscardSuccessorStageLocked(nullptr);
     if (coordinator_.Phase() == AudioCoreGatePhase::Active &&
         coordinator_.SinkState() == ExclusiveSinkState::Running) {
         userPauseIntent_ = true;
@@ -279,6 +291,7 @@ void AudioCoreRuntime::OnTransportSkip(std::uint64_t epoch) noexcept {
     }
     // Previous/Next, or a direct-selection confirmation that still owns the
     // armed generation, is an explicit retirement rather than natural EOS.
+    DiscardSuccessorStageLocked(nullptr);
     RetireCaptureLocked(true);
     seekFence_ = true;
     seekFenceReleaseTick_ = GetTickCount64() + 500;
@@ -297,6 +310,7 @@ void AudioCoreRuntime::OnTransportSeekBegin(std::uint64_t epoch) noexcept {
     // scrubber. Apple may rebuild several transient graphs while the pointer
     // moves; those graphs may capture P0, but they are not allowed to own the
     // endpoint until the matching commit settles.
+    DiscardSuccessorStageLocked(nullptr);
     RetireCaptureLocked(true);
     Wake();
 }
@@ -448,6 +462,11 @@ void AudioCoreRuntime::OnConverterReset(void* converter, bool forceTimelineRetir
     if (!UiEnabled()) return;
     registry_.Reset(converter);
     std::lock_guard lock(controlMutex_);
+    // A Reset after frames were staged restarts the successor's timeline, so
+    // the staged prefix no longer leads into what the converter produces next.
+    if (successorStageWriteFrames_.load(std::memory_order_acquire) != 0) {
+        DiscardSuccessorStageLocked(converter);
+    }
     const bool bound = boundConverter_.load(std::memory_order_acquire) == converter;
     if (forceTimelineRetire) {
         // Ordinary local-file seeking has a version-locked Reset fingerprint.
@@ -576,6 +595,10 @@ void AudioCoreRuntime::OnConverterDisposed(void* converter) noexcept {
     if (!UiEnabled()) return;
     const bool wasBound = boundConverter_.load(std::memory_order_acquire) == converter;
     registry_.Retire(converter);
+    if (successorStageConverter_.load(std::memory_order_acquire) == converter) {
+        std::lock_guard lock(controlMutex_);
+        DiscardSuccessorStageLocked(converter);
+    }
     if (!wasBound) return;
     std::lock_guard lock(controlMutex_);
     if (boundConverter_.load(std::memory_order_acquire) == converter) {
@@ -1019,7 +1042,15 @@ bool AudioCoreRuntime::OnPcmOutput(void* converter, const ApplePcmFormatView& fo
                    boundConverter_.load(std::memory_order_acquire) != converter ||
                    snapshot.registration.mediaGeneration !=
                        boundMediaGeneration_.load(std::memory_order_acquire)) {
-            RecordPcmReject(AudioCorePcmRejectReason::RegistryUnbound);
+            ApplePcmOutputView output{};
+            if (successorStageConverter_.load(std::memory_order_acquire) == converter &&
+                snapshot.registration.outputFormat.sampleRate == format.sampleRate &&
+                snapshot.registration.outputFormat.channels == format.channelsPerFrame &&
+                ParseApplePcmOutput(format, list, producedPackets, output)) {
+                (void)StageSuccessorPcm(converter, output);
+            } else {
+                RecordPcmReject(AudioCorePcmRejectReason::RegistryUnbound);
+            }
         } else {
             const bool rateMatches =
                 snapshot.registration.outputFormat.sampleRate == format.sampleRate;
@@ -1032,7 +1063,14 @@ bool AudioCoreRuntime::OnPcmOutput(void* converter, const ApplePcmFormatView& fo
                 return false;
             }
             ApplePcmOutputView output{};
-            if (ParseApplePcmOutput(format, list, producedPackets, output)) {
+            const bool parsed = ParseApplePcmOutput(format, list, producedPackets, output);
+            if (parsed && successorStageConverter_.load(std::memory_order_acquire) == converter &&
+                !ReplaySuccessorStage(converter)) {
+                // Staged frames are still waiting for queue space. The live
+                // block must queue behind them to stay sample-contiguous.
+                accepted = StageSuccessorPcm(converter, output);
+                Wake();
+            } else if (parsed) {
                 std::uint64_t firstFrame{};
                 bool discontinuity{};
                 if (registry_.ClaimFrames(converter, output.frames, firstFrame, discontinuity)) {
@@ -1148,6 +1186,7 @@ DWORD AudioCoreRuntime::WorkerMain() noexcept {
                 continue;
             }
             FinalizeEndOfStreamDrainLocked();
+            ReportSuccessorStageLocked();
             if (!graphBound_) {
                 if (void* pendingLocal =
                         pendingLocalRebindConverter_.exchange(nullptr, std::memory_order_acq_rel)) {
@@ -1169,8 +1208,11 @@ DWORD AudioCoreRuntime::WorkerMain() noexcept {
                 }
             }
             TryActivateLocked();
+            // Staged successor frames are already decoded media the sink will
+            // play, so they count toward the reservoir the pump regulates.
             nativePumpBufferedFrames_.store(
-                graphBound_ ? static_cast<std::uint64_t>(coordinator_.BufferedFrames()) : 0,
+                (graphBound_ ? static_cast<std::uint64_t>(coordinator_.BufferedFrames()) : 0) +
+                    SuccessorStagePendingFrames(),
                 std::memory_order_release);
             if (coordinator_.Phase() == AudioCoreGatePhase::Active) {
                 const auto now = GetTickCount64();
@@ -1233,7 +1275,10 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
     // previous track's final short endpoint period is released. Preserve the
     // old queue/sink until that terminal ReleaseBuffer completes; the current
     // graph identity is retained and rebound by FinalizeEndOfStreamDrainLocked.
-    if ((endOfStreamDrainPending_ || streamingProducerDrainPending_) && graphBound_) return;
+    if ((endOfStreamDrainPending_ || streamingProducerDrainPending_) && graphBound_) {
+        ArmSuccessorStageLocked();
+        return;
+    }
 
     if (!graphConverter_ && graphSourceBits_ != 0) {
         registry_.FindCandidate(graphRate_, graphChannels_, graphSourceBits_,
@@ -1529,9 +1574,11 @@ void AudioCoreRuntime::RetireCaptureLocked(bool keepGraph) noexcept {
     const bool hasCapture = graphBound_ ||
         boundConverter_.load(std::memory_order_acquire) != nullptr ||
         coordinator_.Phase() != AudioCoreGatePhase::Off;
+    void* retired{};
     if (hasCapture) {
         coordinator_.SetSinkResumeBlocked(false);
         const auto converter = boundConverter_.exchange(nullptr, std::memory_order_acq_rel);
+        retired = converter;
         if (converter) {
             tap_.Retire(converter);
             registry_.Unbind(converter);
@@ -1546,6 +1593,14 @@ void AudioCoreRuntime::RetireCaptureLocked(bool keepGraph) noexcept {
         requiredPrebufferFrames_ = 0;
         nextTelemetryTick_ = 0;
     }
+    // Retiring the drained predecessor is exactly when a staged successor is
+    // about to bind, so only a retired successor or a torn-down graph drops
+    // the stage. Callbacks have quiesced above, so no replay is in flight.
+    if (!keepGraph) {
+        DiscardSuccessorStageLocked(nullptr);
+    } else if (retired) {
+        DiscardSuccessorStageLocked(retired);
+    }
     if (!keepGraph) {
         graphUnit_ = nullptr;
         graphConverter_ = nullptr;
@@ -1554,6 +1609,173 @@ void AudioCoreRuntime::RetireCaptureLocked(bool keepGraph) noexcept {
         graphSourceBits_ = 0;
         graphStarted_ = false;
     }
+}
+
+void AudioCoreRuntime::ArmSuccessorStageLocked() noexcept {
+    void* candidate = graphConverter_;
+    if (!candidate && graphSourceBits_ != 0) {
+        registry_.FindCandidate(graphRate_, graphChannels_, graphSourceBits_,
+                                graphObservationId_, candidate);
+    }
+    // Local LPCM successors already have their own pre-SRC staging queue.
+    if (!candidate || seekFence_ || userPauseIntent_ ||
+        candidate == boundConverter_.load(std::memory_order_acquire) ||
+        candidate == successorStageConverter_.load(std::memory_order_acquire) ||
+        !IsP0Converter(candidate)) {
+        return;
+    }
+    ConverterRegistrationSnapshot snapshot{};
+    if (!registry_.Snapshot(candidate, snapshot) ||
+        snapshot.registration.outputFormat.channels != kSupportedChannels ||
+        snapshot.registration.outputFormat.sampleRate != graphRate_) {
+        return;
+    }
+    if (successorStageCapacityFrames_.load(std::memory_order_acquire) == 0) {
+        try {
+            successorStage_.assign(
+                static_cast<std::size_t>(kSuccessorStageFrames) * kSupportedChannels, 0.0f);
+        } catch (...) {
+            return;
+        }
+        successorStageCapacityFrames_.store(kSuccessorStageFrames, std::memory_order_release);
+    }
+    if (successorStageConverter_.load(std::memory_order_acquire)) {
+        // A copy into the previous stage may still be in flight; let it
+        // finish before the cursors are reused.
+        DiscardSuccessorStageLocked(nullptr);
+        while (callbackDepth_.load(std::memory_order_acquire) != 0) SwitchToThread();
+    }
+    successorStageWriteFrames_.store(0, std::memory_order_release);
+    successorStageReadFrames_.store(0, std::memory_order_release);
+    successorStageOverflow_.store(false, std::memory_order_release);
+    successorStageDroppedFrames_.store(0, std::memory_order_release);
+    successorStageConverter_.store(candidate, std::memory_order_release);
+    if (callbacks_.onSinkDiagnostic) {
+        const std::wstring text = L"runtime successor stage armed converter=" +
+            std::to_wstring(reinterpret_cast<std::uintptr_t>(candidate)) +
+            L" rate=" + std::to_wstring(graphRate_);
+        callbacks_.onSinkDiagnostic(callbacks_.context, text.c_str());
+    }
+}
+
+void AudioCoreRuntime::DiscardSuccessorStageLocked(void* converter) noexcept {
+    void* staged = successorStageConverter_.load(std::memory_order_acquire);
+    if (!staged || (converter && staged != converter)) return;
+    FinishSuccessorStage(staged, kSuccessorStageDiscarded);
+}
+
+bool AudioCoreRuntime::StageSuccessorPcm(void* converter,
+                                         const ApplePcmOutputView& output) noexcept {
+    if (output.frames == 0 ||
+        successorStageConverter_.load(std::memory_order_acquire) != converter) {
+        return false;
+    }
+    const auto capacity = successorStageCapacityFrames_.load(std::memory_order_acquire);
+    const auto write = successorStageWriteFrames_.load(std::memory_order_acquire);
+    if (successorStageOverflow_.load(std::memory_order_acquire) ||
+        write + output.frames > capacity) {
+        // A gap would make the stage no longer start the successor
+        // contiguously; replay refuses an overflowed stage.
+        successorStageOverflow_.store(true, std::memory_order_release);
+        successorStageDroppedFrames_.fetch_add(output.frames, std::memory_order_relaxed);
+        return false;
+    }
+    float* destination = successorStage_.data() + static_cast<std::size_t>(write) * kSupportedChannels;
+    if (output.layout == ApplePcmLayout::InterleavedFloat32 && output.interleaved) {
+        std::memcpy(destination, output.interleaved,
+                    static_cast<std::size_t>(output.frames) * kSupportedChannels * sizeof(float));
+    } else if (output.layout == ApplePcmLayout::PlanarFloat32 && output.left && output.right) {
+        for (std::uint32_t frame = 0; frame < output.frames; ++frame) {
+            destination[static_cast<std::size_t>(frame) * kSupportedChannels] = output.left[frame];
+            destination[static_cast<std::size_t>(frame) * kSupportedChannels + 1u] =
+                output.right[frame];
+        }
+    } else {
+        return false;
+    }
+    successorStageWriteFrames_.store(write + output.frames, std::memory_order_release);
+    return true;
+}
+
+bool AudioCoreRuntime::ReplaySuccessorStage(void* converter) noexcept {
+    if (successorStageOverflow_.load(std::memory_order_acquire)) {
+        // Splicing a partial stage would put a gap inside the track; keep the
+        // pre-stage behaviour (live capture only) instead.
+        FinishSuccessorStage(converter, kSuccessorStageDiscarded);
+        return true;
+    }
+    auto read = successorStageReadFrames_.load(std::memory_order_acquire);
+    const auto write = successorStageWriteFrames_.load(std::memory_order_acquire);
+    const float* stage = successorStage_.data();
+    bool forwarded{};
+    while (read < write) {
+        // Never let the replay fill the fixed-capacity queue: a refused push
+        // fails the whole generation.
+        if (coordinator_.BufferedBlocks() >= kSuccessorReplayBlockLimit) break;
+        const auto frames = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(write - read, kMaxBlockFrames));
+        std::uint64_t firstFrame{};
+        bool discontinuity{};
+        if (!registry_.ClaimFrames(converter, frames, firstFrame, discontinuity) ||
+            !tap_.OnInterleaved(converter, firstFrame,
+                                stage + static_cast<std::size_t>(read) * kSupportedChannels,
+                                frames, discontinuity, false)) {
+            successorStageReadFrames_.store(read, std::memory_order_release);
+            FinishSuccessorStage(converter, kSuccessorStageDiscarded);
+            return true;
+        }
+        if (callbacks_.deepDiagnostics) {
+            acceptedCalls_.fetch_add(1, std::memory_order_relaxed);
+            acceptedFrames_.fetch_add(frames, std::memory_order_relaxed);
+        }
+        read += frames;
+        forwarded = true;
+    }
+    successorStageReadFrames_.store(read, std::memory_order_release);
+    if (forwarded) Wake();
+    if (read < write) return false;
+    FinishSuccessorStage(converter, kSuccessorStageReplayed);
+    return true;
+}
+
+void AudioCoreRuntime::FinishSuccessorStage(void* converter, std::uint32_t result) noexcept {
+    void* expected = converter;
+    if (!converter || !successorStageConverter_.compare_exchange_strong(
+            expected, nullptr, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        return;
+    }
+    successorStageReportResult_.store(result, std::memory_order_relaxed);
+    successorStageReportFrames_.store(
+        successorStageWriteFrames_.load(std::memory_order_acquire), std::memory_order_relaxed);
+    successorStageReportReplayed_.store(
+        successorStageReadFrames_.load(std::memory_order_acquire), std::memory_order_relaxed);
+    successorStageReportDropped_.store(
+        successorStageDroppedFrames_.load(std::memory_order_acquire), std::memory_order_relaxed);
+    successorStageReportPending_.store(true, std::memory_order_release);
+    Wake();
+}
+
+std::uint64_t AudioCoreRuntime::SuccessorStagePendingFrames() const noexcept {
+    if (!successorStageConverter_.load(std::memory_order_acquire)) return 0;
+    const auto write = successorStageWriteFrames_.load(std::memory_order_acquire);
+    const auto read = successorStageReadFrames_.load(std::memory_order_acquire);
+    return write > read ? write - read : 0;
+}
+
+void AudioCoreRuntime::ReportSuccessorStageLocked() noexcept {
+    if (!successorStageReportPending_.exchange(false, std::memory_order_acq_rel)) return;
+    if (!callbacks_.onSinkDiagnostic) return;
+    const bool replayed =
+        successorStageReportResult_.load(std::memory_order_relaxed) == kSuccessorStageReplayed;
+    const std::wstring text = std::wstring(L"runtime successor stage ") +
+        (replayed ? L"replayed" : L"discarded") +
+        L" stagedFrames=" +
+        std::to_wstring(successorStageReportFrames_.load(std::memory_order_relaxed)) +
+        L" replayedFrames=" +
+        std::to_wstring(successorStageReportReplayed_.load(std::memory_order_relaxed)) +
+        L" droppedFrames=" +
+        std::to_wstring(successorStageReportDropped_.load(std::memory_order_relaxed));
+    callbacks_.onSinkDiagnostic(callbacks_.context, text.c_str());
 }
 
 bool AudioCoreRuntime::BuildFormat(const ConverterRegistrationSnapshot& snapshot,

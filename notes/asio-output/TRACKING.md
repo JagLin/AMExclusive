@@ -1,7 +1,7 @@
 # TRACKING — asio-output（feat/asio-output）
 
 **交接（2026-10-21）**：ASIO 輸出已上線並 push（branch `feat/asio-output` = origin，HEAD `db7217d`），本機與 Win10 都能用；GUAC32、JPLAY 實機出聲，Win10 串流 48k/24-bit 長播無斷音。設定頁有輸出裝置選單。進入暫時收尾。現在卡在 Win10 串流換曲偶爾少第一個音：mod 層計數無遺失，等使用者做 A/B/C 對照再定方向。
-- 先讀：OQ-12、F-35、F-36，其次 ADR-8、ADR-9、ADR-10、OQ-1、OQ-2、F-20、F-25
+- 先讀：OQ-12、ADR-15、F-37、F-35、F-36，其次 ADR-8、ADR-9、ADR-10、OQ-1、OQ-2、F-20、F-25
 - 別再撿：F-14（AVCF 不是佇列／重複觸發）、F-16（ConvertBuffer／FillBuffer 沒被用）、F-6（Agent 不是 AppContainer）、F-17（公開 API 拿不到 AVCF 的 pre-SRC PCM）
 - 線上 living doc（同一段歷史的人讀版）：F-31
 
@@ -88,6 +88,16 @@
 - 依據：上游 tree 只有 `.github`、`assets`、`mod`、`third_party`，`notes/` 不在 `.gitignore`。
 - 狀態：已落地（2026-10-21）。
 
+### ADR-15 舊曲收尾期間暫存新曲的 P0
+- 決定：舊 generation 的 drain 還佔著 sink 時，`TryBindGraphLocked` 不再單純 return，而是對串流 successor 預約一個暫存區（`AudioCoreRuntime` 的 `successorStage_`：8 秒 @192 kHz，約 12 MB，第一次用到時配置一次，之後不再 resize）。successor 的 P0 在 unbound 時先複製進去；綁定後由同一個 converter callback 先回放暫存區，回放完才接即時 PCM，所以 queue 仍然只有一個 producer。暫存的 frames 也算進 pump 水位。
+- 遇到以下情況丟棄暫存，退回原本只收即時資料的行為：overflow、successor 被 Reset／Dispose、使用者 pause、skip、seek、graph 拆除。
+- 使用者原話：「照你的建議修取樣率切換換曲時新曲開頭被吃掉的問題。」
+- 放棄：
+  - drain 期間暫停 Apple 的 pump 讓解碼器停住。Apple render thread 等不到 event 時會怎樣不明，有觸發 device lost 的風險。
+  - 丟掉舊曲不足一個 period 的尾段、直接綁新曲。這會截斷音樂。
+  - source wait 時讓 ASIO driver 繼續跑、補零。這會插入靜音，而且仍會少約 0.5 秒。
+- 狀態：已 commit 並 push（2026-10-22，commit 標題「fix(audio_v2): stage successor P0 while the previous track drains」），待 Win10 實測（OQ-12）。log 驗證點：`v2 sink runtime successor stage armed` 與 `... replayed stagedFrames=… replayedFrames=…`。
+
 ## §2 Open Questions
 
 | ID | 問題 | 開立 |
@@ -103,7 +113,7 @@
 | OQ-9 | 未做逐樣本 bit-perfect 比對（`BitPerfectVerifier` 只在 deep diagnostics 啟用）。 | 2026-10-21 |
 | OQ-10 | 串流驗證完整後是否對上游開 PR。 | 2026-10-21 |
 | OQ-11 | `mod\build\dist\AMExclusive-Setup.exe` 仍是上游舊版（03:16），未重跑 `Build-Mod.ps1`（F-28）。 | 2026-10-21 |
-| OQ-12 | Win10 串流連續播放時，自然換曲的第一個音偶爾消失（F-35、F-36），掉在哪一層未定。使用者「改天再測試」。待做對照：同一組相鄰曲目、各設定多試幾次——A 關閉獨占、B 獨占＋WASAPI、C 獨占＋JPLAY。A 也掉 → Apple 無縫播放本身；B 掉 A 不掉 → Apple 或 mod，下一步加診斷把換曲前後幾秒的實際輸出寫成 WAV 比對波形；只有 C 掉 → JPLAY 引擎。可另開 `native_trace=true`（手動加進 ini）並記下出問題的換曲時間或曲名，對照沒問題的換曲。 | 2026-10-21 |
+| OQ-12 | Win10 串流連續播放時，自然換曲的第一個音偶爾消失（F-35、F-36）。取樣率切換的那一種已找到成因（F-37），修正見 ADR-15，待 Win10 實測；同取樣率的那一種掉在哪一層仍未定。使用者「改天再測試」。待做對照：同一組相鄰曲目、各設定多試幾次——A 關閉獨占、B 獨占＋WASAPI、C 獨占＋JPLAY。A 也掉 → Apple 無縫播放本身；B 掉 A 不掉 → Apple 或 mod，下一步加診斷把換曲前後幾秒的實際輸出寫成 WAV 比對波形；只有 C 掉 → JPLAY 引擎。可另開 `native_trace=true`（手動加進 ini）並記下出問題的換曲時間或曲名，對照沒問題的換曲。 | 2026-10-21 |
 
 ## §3 方法論
 
@@ -119,7 +129,7 @@
 - 原生輸出與 AVCF：F-12、F-13、F-14、F-15、F-16、F-17、F-18、F-19、F-20
 - 暫停／恢復：F-10、F-11、F-21、F-22、F-23
 - 緩衝：F-24、F-25
-- 串流換曲：F-35、F-36
+- 串流換曲：F-35、F-36、F-37、F-38
 - 安裝：F-28、F-30
 - 外部資訊與參考：F-31、F-32、F-33
 - 使用者偏好：F-34
@@ -253,7 +263,7 @@ Git Bash 的 `sed -i`／`perl -pi` 會把 CRLF 原始碼改成 LF（本 repo 為
 - 發現脈絡：搜尋 AVCF 討論時掃上游 fork。
 
 ### F-33 commit 清單
-`53ee205` IExclusiveSink、`c32a1da` gitignore SDK、`1eddee7`／`d059b23` 合併上游 `c67c2f3`、`d6152f7` ASIO、`c1751b7` 暫停修正、`857463b` 搬移鎖、`cf9ba62` 輸出裝置選單、`db7217d` pump 水位、`09893bc` 工作紀錄。皆已 push 到 origin。
+`53ee205` IExclusiveSink、`c32a1da` gitignore SDK、`1eddee7`／`d059b23` 合併上游 `c67c2f3`、`d6152f7` ASIO、`c1751b7` 暫停修正、`857463b` 搬移鎖、`cf9ba62` 輸出裝置選單、`db7217d` pump 水位、`09893bc` 工作紀錄、`5541739` 換曲少音紀錄、successor stage 修正（ADR-15）。皆已 push 到 origin。
 - 發現脈絡：收尾整理。
 
 ### F-34 使用者偏好
@@ -263,9 +273,24 @@ Git Bash 的 `sed -i`／`perl -pi` 會把 CRLF 原始碼改成 LF（本 repo 為
 - 發現脈絡：session 中使用者指示。
 
 ### F-35 串流自然換曲時 mod 沒有丟資料
-Win10 log（pid 3968，`db7217d`，JPLAY 24576 frames）三次自然換曲（23:59:43、00:03:36、00:07:14）：Apple 沿用同一個 decoder converter（4279），每次先記 `v2 streaming producer EOF candidate converter=4279 accepted=1`，下一個非零 P0 callback 取消候選、新曲接在尾段後；約 1.6–2.2 秒後才出現下一曲的 `AVCFPlayerItemSetPreferredMaximumAudioSampleRate`／`FigAlternateEligibleLosslessAudioFilterCreate`。換曲前後每 5 秒 `capturedFrames` 與 `acceptedFrames` 同步增加 240,832，capture 層 reject、`droppedFrames`、`sourceWaits`、`underruns` 全為 0，`controlledSilenceFrames` 停在啟動時的 24576；換曲附近沒有 reset／discontinuity log。計數只證明數量連續，不證明內容（順序、對齊）正確。
+Win10 log（pid 3968，`db7217d`，JPLAY 24576 frames）三次自然換曲（23:59:43、00:03:36、00:07:14）：Apple 沿用同一個 decoder converter（4279），每次先記 `v2 streaming producer EOF candidate converter=4279 accepted=1`，下一個非零 P0 callback 取消候選、新曲接在尾段後；約 1.6–2.2 秒後才出現下一曲的 `AVCFPlayerItemSetPreferredMaximumAudioSampleRate`／`FigAlternateEligibleLosslessAudioFilterCreate`。換曲前後每 5 秒 `capturedFrames` 與 `acceptedFrames` 同步增加 240,832，`droppedFrames`、`sourceWaits`、`underruns` 全為 0（capture 層 reject 計數只在 deepDiagnostics 時才累加，production 恆為 0，原本把它當證據是錯的，2026-10-22 更正），`controlledSilenceFrames` 停在啟動時的 24576；換曲附近沒有 reset／discontinuity log。計數只證明數量連續，不證明內容（順序、對齊）正確。
 - 發現脈絡：使用者回報「曲目自然切換的第一秒會消失」後比對 log。
 
 ### F-36 換曲的第一個音是真的消失，不是延遲（負向事實）
 「只是延遲／被大 buffer 推後」的假設不成立。使用者實聽：「I listened: the first note at a track change really is missing, not just late.」並補充「但好像不是每次都會發生」。
 - 發現脈絡：模型先提延遲假設，使用者實測否決，2026-10-21。
+
+### F-37 取樣率切換時，舊曲尾段重啟 JPLAY，吃掉新曲開頭約 3 秒
+Win10 log（`am-exclusive(1).log`，pid 3968）00:44:49 這次 48k→44.1k 換曲，使用者聽到開頭不見：
+- 49.895 EOF candidate（converter 4870）。到 51.06 queue 只剩 15488 frames，不滿一個 period（24576），`AsioSink` 進入 source wait（`sourceWaits` 0→1、`controlledSilenceFrames` +24576），停掉 driver。
+- 51.332 Apple native Stop，seal 尾段（`endOfStreamDrainPending_`）。51.37 新 graph（44.1k，converter 4917）啟動，Apple 開始即時解新曲。
+- seal 後尾段可以 `CanProvide`，sink 為了播這 0.32 秒的尾段重新 `driver_->start()`。JPLAY 在 Win10 start 要約 3 秒，再加兩個 tail callback，舊 sink 到 54.628 才 Stop/Close。
+- drain 期間 `TryBindGraphLocked` 不綁新 graph（原註解假設這段只有「a few milliseconds」）。新曲從 51.37 到約 54.3 的 PCM 沒進 queue；54.629 綁定後，57.68 active 時 `capturedFrames=148051`（3.36 秒），而新 graph 已跑了 6.31 秒，約少 2.9 秒。
+- 對照組 00:37:14（44.1k→48k）沒事：seal 時 sink 還在跑，尾段直接送出，0.13 秒後就 Stop，16.112 綁新 graph，沒有遺失。
+- 偶發的原因：要看 EOF candidate 到 Apple native Stop 這段時間（這兩次 1.27–1.44 秒）內，queue 會不會先降到不滿一個 period。JPLAY 的 period 大、start 又慢，條件就容易成立。
+- 同取樣率、同 converter 的換曲（F-35）不走這條路，那幾次的遺失仍未解釋。
+- 發現脈絡：使用者回報「剛剛突然又發生了一次 我猜在log偏末端」，2026-10-21。
+
+### F-38 JPLAY 在 Win10 的 `start()` 約 3 秒
+同一 log 裡 `StartEnter`→`StartExit`：00:37:16.214→19.388（3.17 秒）、00:44:54.733→57.681（2.95 秒）。本機約 150 ms（F-7）。換曲重開 sink 時這段 queue 會持續累積，不會掉資料；但只要有東西在等 driver 重啟（例如 F-37），就會被拖住。
+- 發現脈絡：分析 F-37 時量到。

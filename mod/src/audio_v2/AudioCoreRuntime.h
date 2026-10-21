@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace ammod::audio_v2 {
 
@@ -222,6 +223,13 @@ private:
     bool BeginEndOfStreamDrainLocked(void* converter, bool requireShortTail) noexcept;
     void FinalizeEndOfStreamDrainLocked() noexcept;
     void RetireCaptureLocked(bool keepGraph) noexcept;
+    void ArmSuccessorStageLocked() noexcept;
+    void DiscardSuccessorStageLocked(void* converter) noexcept;
+    bool StageSuccessorPcm(void* converter, const ApplePcmOutputView& output) noexcept;
+    bool ReplaySuccessorStage(void* converter) noexcept;
+    void FinishSuccessorStage(void* converter, std::uint32_t result) noexcept;
+    std::uint64_t SuccessorStagePendingFrames() const noexcept;
+    void ReportSuccessorStageLocked() noexcept;
     bool BuildFormat(const ConverterRegistrationSnapshot& snapshot,
                      PcmFormat& output) const noexcept;
     std::uint32_t PeriodFrames(std::uint32_t sampleRate) const noexcept;
@@ -282,6 +290,27 @@ private:
     std::atomic<ULONGLONG> directSelectionArmDeadlineTick_{};
     void* pendingLocalSuccessor_{};
     std::atomic<void*> pendingLocalRebindConverter_{};
+    // A streaming successor graph can start while the previous generation's
+    // terminal drain still owns the sink. When that drain must restart a slow
+    // endpoint for a sub-period tail (JPLAY needs ~3 s), the successor's P0
+    // was rejected as unbound for the whole window and the start of the next
+    // track was lost. Its P0 is staged here instead and, once it binds, the
+    // same converter callback replays the stage ahead of live PCM, so the
+    // coordinator queue keeps a single producer. The buffer is allocated once
+    // under controlMutex_ and never resized; the callback only copies.
+    std::vector<float> successorStage_;
+    std::atomic<std::uint64_t> successorStageCapacityFrames_{};
+    std::atomic<void*> successorStageConverter_{};
+    std::atomic<std::uint64_t> successorStageWriteFrames_{};
+    std::atomic<std::uint64_t> successorStageReadFrames_{};
+    std::atomic<bool> successorStageOverflow_{};
+    std::atomic<std::uint64_t> successorStageDroppedFrames_{};
+    // Callback -> worker report, logged off the callback thread.
+    std::atomic<bool> successorStageReportPending_{};
+    std::atomic<std::uint32_t> successorStageReportResult_{};
+    std::atomic<std::uint64_t> successorStageReportFrames_{};
+    std::atomic<std::uint64_t> successorStageReportReplayed_{};
+    std::atomic<std::uint64_t> successorStageReportDropped_{};
     std::uint64_t nextMediaGeneration_{1};
     std::atomic<std::uint64_t> boundMediaGeneration_{};
     std::uint32_t requiredPrebufferFrames_{};
