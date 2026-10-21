@@ -30,6 +30,7 @@ public:
     }
     ExclusiveSinkStats Stats() const noexcept override;
     const PcmFormat& Format() const noexcept override { return config_.format; }
+    std::uint32_t BufferFrames() const noexcept override { return bufferFrames_; }
     bool WaitingForSource() const noexcept override {
         return waitingForSource_.load(std::memory_order_acquire);
     }

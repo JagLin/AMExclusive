@@ -129,6 +129,10 @@ public:
     virtual ExclusiveSinkStats Stats() const noexcept = 0;
     // The format actually negotiated by Open(); valid until Close().
     virtual const PcmFormat& Format() const noexcept = 0;
+    // Frames the device consumes per period as negotiated by Open() (WASAPI
+    // buffer, ASIO buffer half); 0 when closed. Drivers may ignore the
+    // requested period entirely, so buffering targets must use this value.
+    virtual std::uint32_t BufferFrames() const noexcept = 0;
     virtual bool WaitingForSource() const noexcept = 0;
     virtual bool EndOfStreamSubmitted() const noexcept = 0;
     // The coordinator blocks the render thread from consuming a producer

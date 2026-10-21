@@ -326,6 +326,8 @@ private:
     std::atomic<std::uint32_t> lastProducedPackets_{};
     std::atomic<std::uint32_t> nativePumpSampleRate_{};
     std::atomic<std::uint64_t> nativePumpBufferedFrames_{};
+    // Actual device period of the open sink; 0 until the endpoint is open.
+    std::atomic<std::uint32_t> nativePumpSinkPeriodFrames_{};
 };
 
 } // namespace ammod::audio_v2

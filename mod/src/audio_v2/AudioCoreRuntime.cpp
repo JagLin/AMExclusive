@@ -69,6 +69,7 @@ bool AudioCoreRuntime::Start(const AudioCoreRuntimeCallbacks& callbacks) noexcep
     lastProducedPackets_.store(0, std::memory_order_release);
     nativePumpSampleRate_.store(0, std::memory_order_release);
     nativePumpBufferedFrames_.store(0, std::memory_order_release);
+    nativePumpSinkPeriodFrames_.store(0, std::memory_order_release);
     userPauseIntent_ = false;
     seekFence_ = false;
     latestSeekEpoch_ = 0;
@@ -1447,6 +1448,10 @@ void AudioCoreRuntime::TryActivateLocked() noexcept {
         if (!playbackRejected) registry_.RetireAll();
         return;
     }
+    // The driver may have ignored the requested period (JPLAY's ASIO bridge
+    // hands over up to ~0.5 s per period); the pump reservoir follows it.
+    nativePumpSinkPeriodFrames_.store(coordinator_.SinkBufferFrames(),
+                                      std::memory_order_release);
     const HRESULT start = coordinator_.Start();
     if (FAILED(start)) {
         if (!callbacks_.nativeHandoffPreservesScheduling &&
@@ -1537,6 +1542,7 @@ void AudioCoreRuntime::RetireCaptureLocked(bool keepGraph) noexcept {
         boundMediaGeneration_.store(0, std::memory_order_release);
         nativePumpBufferedFrames_.store(0, std::memory_order_release);
         nativePumpSampleRate_.store(0, std::memory_order_release);
+        nativePumpSinkPeriodFrames_.store(0, std::memory_order_release);
         requiredPrebufferFrames_ = 0;
         nextTelemetryTick_ = 0;
     }
@@ -1578,9 +1584,13 @@ std::uint32_t AudioCoreRuntime::NativePumpPeriodMs() const noexcept {
     // Keep a modest load-jitter reservoir without returning to the old 1+ s
     // pause-latency buffer. 300-500 ms gives the producer substantially more
     // scheduling headroom while the 9/10/11 ms loop still corrects clock drift.
-    const std::uint64_t lowWaterFrames =
-        (static_cast<std::uint64_t>(sampleRate) * 3u) / 10u;
-    const std::uint64_t highWaterFrames = sampleRate / 2u;
+    // A sink that removes a whole large period at once (ASIO bridges such as
+    // JPLAY at 24576 frames) needs at least one period left at every callback,
+    // so the band never sits below 2-3 actual device periods.
+    const std::uint64_t period = nativePumpSinkPeriodFrames_.load(std::memory_order_acquire);
+    const std::uint64_t lowWaterFrames = std::max<std::uint64_t>(
+        (static_cast<std::uint64_t>(sampleRate) * 3u) / 10u, period * 2u);
+    const std::uint64_t highWaterFrames = std::max<std::uint64_t>(sampleRate / 2u, period * 3u);
     if (bufferedFrames < lowWaterFrames) return kCatchUpMs;
     if (bufferedFrames > highWaterFrames) return kBackOffMs;
     return kNominalMs;

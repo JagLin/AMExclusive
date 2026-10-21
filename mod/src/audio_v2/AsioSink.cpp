@@ -751,7 +751,10 @@ void AsioSink::TryResumeAfterSourceWait() noexcept {
         state_.load(std::memory_order_acquire) != ExclusiveSinkState::Running) {
         return;
     }
-    if (!source_->CanProvide(bufferFrames_)) return;
+    // Restart only with two periods queued: the driver takes a full period at
+    // every callback, so resuming on exactly one would starve again on the
+    // very next half and turn one wait into a stutter of short silences.
+    if (!source_->CanProvide(bufferFrames_ * 2u)) return;
     ZeroAllHalves();
     tailCallbacks_ = 0;
     stopRequested_.store(false, std::memory_order_release);

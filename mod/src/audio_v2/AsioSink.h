@@ -58,6 +58,8 @@ public:
     }
     ExclusiveSinkStats Stats() const noexcept override;
     const PcmFormat& Format() const noexcept override { return config_.format; }
+    // Written by the worker during Open/Close, which the caller waits for.
+    std::uint32_t BufferFrames() const noexcept override { return bufferFrames_; }
     bool WaitingForSource() const noexcept override {
         return waitingForSource_.load(std::memory_order_acquire);
     }

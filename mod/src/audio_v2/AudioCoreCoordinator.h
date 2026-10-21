@@ -78,6 +78,7 @@ public:
     const AudioCoreCoordinatorStats Stats() const noexcept;
     const IExclusiveSink& Sink() const noexcept { return *sink_; }
     ExclusiveSinkState SinkState() const noexcept { return sink_->State(); }
+    std::uint32_t SinkBufferFrames() const noexcept { return sink_->BufferFrames(); }
     void SetSinkResumeBlocked(bool blocked) noexcept { sink_->SetResumeBlocked(blocked); }
     std::size_t BufferedBlocks() const noexcept { return queue_ ? queue_->Size() : 0; }
     std::size_t BufferedFrames() const noexcept {
