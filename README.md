@@ -6,7 +6,7 @@
 
 ### Make Apple Music on Windows a “Pro” Hi-Fi Player
 
-[中文](README.zh-CN.md)
+[简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md)
 
 [Website](https://amexclusive.tgwgroup.ltd/en/) · [Documentation](https://amexclusive.tgwgroup.ltd/en/docs/)
 
