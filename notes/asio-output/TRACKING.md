@@ -1,7 +1,7 @@
 # TRACKING — asio-output（feat/asio-output）
 
-**交接（2026-10-21）**：ASIO 輸出已上線並 push（branch `feat/asio-output` = origin，HEAD `db7217d`），本機與 Win10 都能用；GUAC32、JPLAY 實機出聲，Win10 串流 48k/24-bit 長播無斷音。設定頁有輸出裝置選單。進入暫時收尾。現在卡在 Win10 串流換曲偶爾少第一個音：mod 層計數無遺失，等使用者做 A/B/C 對照再定方向。
-- 先讀：OQ-12、ADR-15、F-37、F-35、F-36，其次 ADR-8、ADR-9、ADR-10、OQ-1、OQ-2、F-20、F-25
+**交接（2026-10-23）**：ASIO 輸出已上線，`feat/asio-output` 已併回 `main` 並 push。本機與 Win10 都能用；GUAC32、JPLAY 實機出聲，設定頁有輸出裝置選單。2026-10-23 依朋友 Win10 測試修了跳段落沒聲音（ADR-17）與兩次單擊誤判成選歌（ADR-18），朋友重裝後初步正常。仍待：Win10 串流換曲偶爾少第一個音（OQ-12），等 A/B/C 對照。
+- 先讀：ADR-17、ADR-18、F-41、F-42，其次 OQ-12、ADR-15、F-37、F-35、F-36、ADR-8、ADR-9、ADR-10、OQ-1、OQ-2、F-20、F-25
 - 別再撿：F-14（AVCF 不是佇列／重複觸發）、F-16（ConvertBuffer／FillBuffer 沒被用）、F-6（Agent 不是 AppContainer）、F-17（公開 API 拿不到 AVCF 的 pre-SRC PCM）
 - 線上 living doc（同一段歷史的人讀版）：F-31
 
@@ -104,6 +104,19 @@
 - 依據：F-40。
 - 狀態：已 commit 並 push（2026-10-22，commit 標題「fix(broker): follow a surviving AppleMusic.exe instead of exiting」），本機已安裝，使用者初步使用正常；改綁路徑本身還沒在 log 中觸發過。
 
+### ADR-17 前一代被 Dispose 收掉後，由 worker 綁上已暫存的 successor
+- 決定：`OnConverterDisposed` 只在 `graphConverter_` 就是被丟掉的那個 converter 時才清空；worker 每輪檢查「沒有綁定、但 `graphConverter_` 就是已暫存的 successor」時呼叫 `TryBindGraphLocked`，回放暫存區。
+- 使用者原話：「上次的apple music mod後來我找朋友幫忙測試win10 有一些小地方想改進」（朋友回報跳段落必定沒聲音，偶發）。修法由模型提出並直接實作，使用者之後同意 commit。
+- 依據：F-41。
+- 狀態：已 commit 並併回 `main`（2026-10-23）；朋友 Win10 重裝後初步回報正常。
+
+### ADR-18 雙擊選歌的判定：用系統雙擊時間，且等 Apple 真的換歌才停輸出
+- 決定：`UiAdapter` 判定同一列按兩下的時間窗從 650 ms 改為 `GetDoubleClickTime()`。`OnTransportSkip` 遇到 direct selection 時不再立刻 `RetireCaptureLocked`，只開 seek fence；Apple 的 Stop／Dispose／新 graph 照既有規則退役舊的一代，Apple 沒動作時 fence 500 ms 後自然解除、聲音不斷。上一首／下一首按鈕仍立即退役。
+- 使用者原話：「兩項都修：雙擊判定改用系統的雙擊時間，而且判定為選歌時，等 Apple 真的換歌才停掉輸出。」
+- 已知缺口：誤判剛好落在自然結束前約 0.5 秒內時，fence 期間的 producer EOF 會被忽略，舊曲尾段可能被截。未處理。
+- 依據：F-42。
+- 狀態：已 commit 並併回 `main`（2026-10-23）；朋友 Win10 重裝後初步回報正常。
+
 ## §2 Open Questions
 
 | ID | 問題 | 開立 |
@@ -115,7 +128,7 @@
 | OQ-5 | 關掉 Apple Music 後 `AMPLibraryAgent` 常留背景，重開時兩個 agent 同時連 broker，影響未查。 | 2026-10-21 |
 | OQ-6 | AVCF 本機檔接管（F-17、F-18）：便宜的下一步是診斷 unit 808 輸入是否經公開 render callback（屬性 23）；否則需 vtable hook 並記入 `ApplePrivateOffsets.h`。依 ADR-8 擱置。 | 2026-10-21 |
 | OQ-7 | 設定頁是否顯示實際 buffer（例「實際：440 frames（10 ms）」）並在固定大小驅動時標不適用——模型提議，使用者未表態。 | 2026-10-21 |
-| OQ-8 | UI log 每 5 秒 `GetAppProperty(MiniPlayerWindow) failed hr=0x8000000b`，推測 MiniPlayer 未開時的輪詢，未確認。 | 2026-10-21 |
+| OQ-8 | ~~UI log 每 5 秒 `GetAppProperty(MiniPlayerWindow) failed hr=0x8000000b`，推測 MiniPlayer 未開時的輪詢，未確認。~~ 結案（2026-10-23）：`E_BOUNDS` 就是 MiniPlayer 沒開，已不記 log（F-43）。 | 2026-10-21 |
 | OQ-9 | 未做逐樣本 bit-perfect 比對（`BitPerfectVerifier` 只在 deep diagnostics 啟用）。 | 2026-10-21 |
 | OQ-10 | 串流驗證完整後是否對上游開 PR。 | 2026-10-21 |
 | OQ-11 | `mod\build\dist\AMExclusive-Setup.exe` 仍是上游舊版（03:16），未重跑 `Build-Mod.ps1`（F-28）。 | 2026-10-21 |
@@ -320,3 +333,25 @@ Win10 log（`am-exclusive(1).log`，pid 3968）00:44:49 這次 48k→44.1k 換�
 - 這段綁定邏輯沿用上游，跟 ASIO 無關。之前「點封面後沒正常啟動獨佔，關掉 Apple Music 重開就好」那次，可能也是同一個原因（未確認）。
 - 修正見 ADR-16。
 - 發現脈絡：使用者回報「現在的撥放似乎攔截失敗」，2026-10-22。
+
+### F-41 串流跳段落時新 graph 比舊 converter 的 Dispose 早到，successor 被孤立
+朋友 Win10（Apple Music `1.1540.23041.0`、JPLAY 5 Hz 8192 frames）log 13:51:51、13:52:06（log 時間約比聊天記錄快 1 小時）：
+- 串流跳段落時 Apple 的順序是：native client Stop（`eofReady=0`，記 `awaiting producer EOF`）→ 子 AudioUnit Uninitialize → 新 P0 converter + 同一個子 unit 重新 Initialize → `successor stage armed` → 輸出 unit Start → 30 ms 後才 Dispose 舊 converter。
+- 舊碼在 Dispose 時 `RetireCaptureLocked(true)` 後無條件清空 `graphConverter_`（那時已指向 successor），之後 Apple 不再發任何事件，successor 永遠沒綁上：sink Close、5 秒後 ASIO driver 釋放（朋友看到「JPLAY 解開了」），暫存區持續累積（約 10 秒 523200 frames），Apple 自己的 native client 照播到預設端點。按下一首或再跳一次段落才恢復。
+- 如果 Dispose 先於新 graph 的 Initialize（例如 13:48:44 選歌），走一般綁定路徑就沒事，所以是偶發；1 Hz 下收尾更久、更容易碰上。
+- 點歌詞、點進度條都是跳段落。UI 在這些操作上都沒送出 seek 訊號（hook log 整份沒有 `seek_begin`），所以全靠 Apple 的 lifecycle 判斷。
+- 使用者轉述朋友原話：「跳PART必定沒聲音」、「感覺有點像偶發事件」、「點歌詞第一次 JPLAY會掉，短時間內再點第二次就會回去」。
+- 修正見 ADR-17。
+- 發現脈絡：使用者轉來朋友 Win10 測試的 log，2026-10-23。
+
+### F-42 兩次單擊被 UI 當成雙擊選歌，輸出被停掉而 Apple 沒換歌
+- `UiAdapter` 以「同一個 ListViewItem 在 650 ms 內按兩次」判定雙擊；Windows 預設雙擊時間是 500 ms。朋友 UI log：13:35:25 兩次點擊相隔約 500 ms、13:35:40 相隔 527 ms，都送出 `skip`，Apple 都沒換歌；13:36:05 相隔 314 ms 是真雙擊。
+- 舊碼一收到 direct selection 的 `skip` 就立刻退役目前這一代；Apple 沒有後續事件，因此約 50 秒沒聲音，直到朋友按暫停、重播。
+- 朋友原話（使用者轉述）：「撥放清單的歌，沒有雙擊，撥放狀態是持續中」。
+- 修正見 ADR-18。
+- 發現脈絡：同 F-41。
+
+### F-43 UI log 的 `RPC_E_WRONG_THREAD` 與 MiniPlayer 輪詢雜訊
+- `transport observer attach failed hr=0x8001010e` 與 `UI attach failed` 成對出現（朋友 log 共 28 次）：WinEvent 在 Apple 其他執行緒的頂層視窗上掛 `WH_GETMESSAGE` hook，`AttachTransportObservers` 在那個執行緒碰 MainWindow 的 XAML 物件。主執行緒之後仍有成功掛上（有 `seek_begin`、`selection_arm` 從 UI 主執行緒送出），暫不處理。
+- `GetAppProperty(MiniPlayerWindow) failed hr=0x8000000b`（`E_BOUNDS`，MiniPlayer 沒開）佔 UI log 6684 行中的 6308 行；已改為 `E_BOUNDS` 不記 log（OQ-8 結案）。
+- log 本身有上限：hook 8 MB、broker 4 MB、UI 2 MB，各留 2 個備份（`BoundedLog.h`）。
