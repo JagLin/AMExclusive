@@ -117,6 +117,27 @@
 - 依據：F-42。
 - 狀態：已 commit 並併回 `main`（2026-10-23）；朋友 Win10 重裝後初步回報正常。
 
+### ADR-19 fork 新增功能與上游檔案隔離（第 1 類重構）
+- 決定：
+  - IPC：fork 的訊息類型與錯誤分類放 `ForkProtocol.h`，用 `0x100` 起的值（以 opaque enum 宣告後 `static_cast`），不再接在上游 enum 尾端；fork 欄位集中成 `ForkMessageFields`，放在 `Message` 最後（`fork` 成員），`reserved[7]` 恢復上游原樣。協定版本 3.0 → 4.0。
+  - 錯誤碼：ASIO 的 HRESULT 移到 `ForkAudioErrors.h`，改用 `0x280`、`0x281`（上游 `kExclusiveFormatUnavailable` 已用掉 `0x203`）。
+  - UI：輸出裝置卡片與它的 UI ↔ Broker 確認流程搬到 `ForkOutputDevice.cpp`，UiAdapter 只留呼叫點，透過 `OutputDeviceHost` 借用 `Localized`／`Log`／`StatusSnapshot`／`ScheduleStatusRefresh`。
+  - Broker：`output`／`asio_driver` 的讀寫、驗證與錯誤說明搬到 `ForkBrokerOutput.cpp`。
+  - 安裝腳本：ini 保留邏輯抽成 `Read-ForkIniKeys`／`Write-ForkIniKeys`，鍵與允許值集中在 `$script:ForkPreservedIniKeys`；仍留在 `Install-Mod.ps1` 內。
+- 使用者原話：「開始重構第 1 類：IPC 和錯誤碼改用 fork 專用號段、欄位放結尾；輸出裝置卡片、Broker 的輸出設定、安裝腳本的 ini 保留搬到獨立檔案。」
+- 偏離：安裝腳本沒有拆成獨立 `.ps1`。安裝程式只會內嵌固定清單的檔案，新增一個 `.ps1` 要同時改 `Generate-SetupResources.ps1`、`CMakeLists.txt`、`SetupInstaller.cpp`、`Install-Mod.ps1` 四個上游檔案，反而增加衝突點。
+- 不在範圍：音訊核心（`IExclusiveSink`、coordinator、runtime）、ADR-16 的改綁、雙擊與 `E_BOUNDS` 修正（屬於修上游程式本身）。
+- 效果（對 `462f856` 試合併）：UiAdapter 15 → 7、IpcProtocol 5 → 1、AudioErrors 1 → 0、Install-Mod 2 → 1、Broker 6 → 5。剩下的都是「兩邊在同一位置各加一行」，合併時兩邊都保留即可。
+- 合併上游時要注意：上游 `Install-Mod.ps1` 在改寫 ini 後會重算 `am-exclusive.ini` 的 hash（`$expectedHashes['am-exclusive.ini']`），`Write-ForkIniKeys` 必須放在那一行之前。
+- 狀態：本機已安裝。已驗證：重裝後保留 `output`／`asio_driver`、JPLAY 正常套用。待驗證：設定頁切換 WASAPI／JPLAY、ASIO driver 不可用時的錯誤對話框。
+
+### ADR-20 hook `AudioConverterConvertBuffer` 截取同取樣率的本機檔
+- 決定：新增 `HookV2AudioConverterConvertBuffer`；轉換成功且該轉換器有本機暫存佇列時，把輸入的原始 PCM 推進佇列，之後與 Fill 路徑相同（`RequestLocalSuccessorBind`／`DrainV2LocalQueue`）。不重取樣、不改樣本。開 `native_trace` 時記 `native trace AudioConverterConvertBuffer`。此 hook 列入 production hooks 的 ready 條件。
+- 使用者原話：「現在開始查同取樣率時 Apple 走哪條路，需要我開 native_trace 就說。」修法由模型依 trace 決定並直接實作。
+- 依據：F-44。
+- 驗證（2026-10-23 18:34，預設格式 48 kHz、JPLAY 8192 frames）：48 kHz／24-bit 本機檔走 ConvertBuffer（每次 16380 bytes = 2730 frames），`exclusive sink active`，`sourceWaits=0`、`droppedFrames=0`；44.1 kHz 本機檔照舊走 Fill 也正常。使用者：「兩首都可以撥」。
+- 狀態：本機已安裝驗證，`native_trace` 已移除；尚未 commit。
+
 ## §2 Open Questions
 
 | ID | 問題 | 開立 |
@@ -133,6 +154,8 @@
 | OQ-10 | 串流驗證完整後是否對上游開 PR。 | 2026-10-21 |
 | OQ-11 | `mod\build\dist\AMExclusive-Setup.exe` 仍是上游舊版（03:16），未重跑 `Build-Mod.ps1`（F-28）。 | 2026-10-21 |
 | OQ-12 | Win10 串流連續播放時，自然換曲的第一個音偶爾消失（F-35、F-36）。取樣率切換的那一種已找到成因（F-37），修正見 ADR-15，待 Win10 實測；同取樣率的那一種掉在哪一層仍未定。使用者「改天再測試」。待做對照：同一組相鄰曲目、各設定多試幾次——A 關閉獨占、B 獨占＋WASAPI、C 獨占＋JPLAY。A 也掉 → Apple 無縫播放本身；B 掉 A 不掉 → Apple 或 mod，下一步加診斷把換曲前後幾秒的實際輸出寫成 WAV 比對波形；只有 C 掉 → JPLAY 引擎。可另開 `native_trace=true`（手動加進 ini）並記下出問題的換曲時間或曲名，對照沒問題的換曲。 | 2026-10-21 |
+| OQ-13 | 上游 `462f856`（PR #3，tag `1.5`）尚未合併。內容：WASAPI 相容格式轉換開關（`allow_resampling`，預設關）、successor 交接修正（`pendingGraphBind_`，與 ADR-17 同一問題）、software buffer／時鐘計算、雙語安裝程式。試合併有 15 檔約 59 處衝突，重點是 IPC 訊息編號 11 與協定版本、runtime successor 交接、WASAPI sink 與 `IExclusiveSink`、UiAdapter。上游自註最終版未做實機播放驗證；`ApplePrivateOffsets.h` 沒有變動。使用者原話：「先不合上游，等上游實機驗證後再說。」 | 2026-10-23 |
+| OQ-14 | ~~本機檔取樣率等於共用格式時沒有資料可截（F-44）。~~ 結案（2026-10-23）：Apple 改用 ConvertBuffer，已由 ADR-20 修正並驗證。原文：本機檔取樣率等於共用格式時沒有資料可截（F-44）。要修得先查同取樣率時 Apple 走哪條路（`native_trace=true` 看呼叫），再決定新的截取點；依 ADR-8 本機檔目前擱置。暫時的繞法：把預設播放裝置格式設成本機檔不會用到的取樣率。 | 2026-10-23 |
 
 ## §3 方法論
 
@@ -355,3 +378,14 @@ Win10 log（`am-exclusive(1).log`，pid 3968）00:44:49 這次 48k→44.1k 換�
 - `transport observer attach failed hr=0x8001010e` 與 `UI attach failed` 成對出現（朋友 log 共 28 次）：WinEvent 在 Apple 其他執行緒的頂層視窗上掛 `WH_GETMESSAGE` hook，`AttachTransportObservers` 在那個執行緒碰 MainWindow 的 XAML 物件。主執行緒之後仍有成功掛上（有 `seek_begin`、`selection_arm` 從 UI 主執行緒送出），暫不處理。
 - `GetAppProperty(MiniPlayerWindow) failed hr=0x8000000b`（`E_BOUNDS`，MiniPlayer 沒開）佔 UI log 6684 行中的 6308 行；已改為 `E_BOUNDS` 不記 log（OQ-8 結案）。
 - log 本身有上限：hook 8 MB、broker 4 MB、UI 2 MB，各留 2 個備份（`BoundedLog.h`）。
+
+### F-44 本機檔取樣率等於共用模式格式時，pre-SRC 截取拿不到資料
+本機 Win11、預設播放裝置共用格式 48 kHz、輸出 JPLAY：
+- 新加入的 48 kHz／24-bit 本機檔：`pre-SRC PCM staging queue created ... rate=48000 bits=24` → `bound` → native client Start，之後 11 秒 `stagingBefore=0`、`acv2Available=0`，停在 Probing（state 3），沒有聲音。整份 log 4 次 48 kHz 本機檔全部如此；44.1 kHz 本機檔一直正常。
+- 推測：pre-SRC 截取是包住 `AudioConverterFillComplexBuffer` 的 input proc（`HookDll.cpp` 的 `wrapInput`）；來源與共用格式同取樣率時，Apple 不經過那個轉換器，mod 就沒有資料。
+- 使用者驗證（2026-10-23）：把預設播放裝置的預設格式改成 44.1 kHz 後，48 kHz 那首可以播，44.1 kHz 的反而無聲。原話：「我測試了切換成預設輸出44.1, 然後發現48k的那首可以播了 44.1的反而無聲, 所以應該算猜對root cuase」
+- 跟 F-17（AVCF，看得到 384000 Hz 轉換器）是不同路徑，沒有 384000。
+- 與 ADR-19 重構無關（重構只動 IPC、UI、Broker、安裝腳本）。
+- native_trace 確認（2026-10-23 18:28–18:30）：48 kHz 那首的轉換器 4149 從建立到 dispose，`AudioConverterFillComplexBuffer` 0 次，只查了 `'cobs'`（計算輸出 buffer 大小）；44.1 kHz 那首有 192 次 Fill，並設了 `'srcq'`、查了 `'prim'`／`'prmm'`。`dumpbin /imports` 顯示 AMPLibraryAgent 另外匯入 `AudioConverterConvertBuffer`，mod 原本沒 hook。結論：同取樣率時 Apple 用 ConvertBuffer 整塊轉換，不走 input callback。F-16 的「ConvertBuffer 0 次」是在 AVCF 路徑，與這裡不矛盾。
+- 修正見 ADR-20。
+- 發現脈絡：重構版本機實測時，使用者新加一首歌，2026-10-23。
