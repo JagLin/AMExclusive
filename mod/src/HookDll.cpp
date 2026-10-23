@@ -3060,8 +3060,8 @@ void ApplyOutputBackendFromStatus(const ammod::ipc::Message& status) {
     static bool appliedAsio{};
     static std::wstring appliedDriver;
     wchar_t driver[ammod::ipc::kOutputDeviceChars]{};
-    wcsncpy_s(driver, status.outputDevice, _TRUNCATE);
-    const bool asio = status.outputBackend == ammod::ipc::OutputBackend::Asio && driver[0];
+    wcsncpy_s(driver, status.fork.outputDevice, _TRUNCATE);
+    const bool asio = status.fork.outputBackend == ammod::ipc::OutputBackend::Asio && driver[0];
     const std::wstring name = asio ? std::wstring(driver) : std::wstring();
     if (applied && asio == appliedAsio && name == appliedDriver) return;
     g_audioCoreRuntime.SetOutputBackend(asio ? ammod::audio_v2::ExclusiveSinkBackend::Asio

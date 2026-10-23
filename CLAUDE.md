@@ -62,10 +62,11 @@ cd mod
 
 - `Message` 是單一 `#pragma pack(1)`、trivially-copyable 的結構，必須 < 4096 bytes。改 layout 時要遞增 `kProtocolMajor`，三端 binary 一起發佈。
 - pipe 名稱與 DACL 綁定目前使用者的 SID；Broker 會比對 `GetNamedPipeClientProcessId` 與 `senderPid`。
+- 本 fork 新增的訊息類型、錯誤分類與欄位放在 `ForkProtocol.h`：值從 `0x100` 起、欄位在 `Message::fork`（結構最後）；fork 的 HRESULT 放 `ForkAudioErrors.h`（`0x280` 起）。不要接在上游 enum 尾端或占用 `reserved`，以免合併上游時撞號（見 TRACKING ADR-19）。
 
 ## 設定與日誌（安裝目錄 `%PUBLIC%\AMExclusive`）
 
-- `am-exclusive.ini` 的 `[mod]` 區段：`mode=exclusive|probe`、`period_100ns`（預設 200000，對應 UI 上的 1–100 ms）、`native_trace`（診斷）、`output=wasapi|asio`、`asio_driver`（`HKLM\SOFTWARE\ASIO` 下的鍵名）。`output`／`asio_driver` 由 Broker 擁有，UI 設定頁的「输出设备」選單經 IPC 寫入，Agent 只從 status 套用。新增 ini key 時，要一併更新 `Install-Mod.ps1` 的保留邏輯。
+- `am-exclusive.ini` 的 `[mod]` 區段：`mode=exclusive|probe`、`period_100ns`（預設 200000，對應 UI 上的 1–100 ms）、`native_trace`（診斷）、`output=wasapi|asio`、`asio_driver`（`HKLM\SOFTWARE\ASIO` 下的鍵名）。`output`／`asio_driver` 由 Broker 擁有，UI 設定頁的「输出设备」選單經 IPC 寫入，Agent 只從 status 套用。新增 ini key 時，要一併更新 `Install-Mod.ps1` 的保留邏輯（fork 的 key 加進 `$script:ForkPreservedIniKeys`）。輸出設定的 UI 與 Broker 端分別在 `ForkOutputDevice.cpp`、`ForkBrokerOutput.cpp`。
 - 日誌：`am-exclusive-broker.log`、`am-exclusive.log`（hook）、`am-exclusive-ui.log`、`am-exclusive-recovery.log`，都用 `BoundedLog.h` 輪替。
 
 ## 程式風格

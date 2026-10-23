@@ -1,6 +1,7 @@
 #include "AsioSink.h"
 #include "NativeRenderGateProxy.h"
 #include "../AudioErrors.h"
+#include "../ForkAudioErrors.h"
 
 #include <objbase.h>
 

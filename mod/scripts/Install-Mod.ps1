@@ -71,6 +71,44 @@ function Start-AppleMusic([string]$Aumid) {
     Start-Process -FilePath $env:WINDIR\explorer.exe -ArgumentList "shell:AppsFolder\$Aumid"
 }
 
+# AMExclusive fork: ini keys the fork owns (the output device selection) that a
+# reinstall must carry over, each with the value pattern it accepts.
+$script:ForkPreservedIniKeys = [ordered]@{
+    output = '^(wasapi|asio)$'
+    asio_driver = '^\S.*$'
+}
+
+function Read-ForkIniKeys([string]$IniPath) {
+    $values = [ordered]@{}
+    if (-not (Test-Path -LiteralPath $IniPath -PathType Leaf)) { return $values }
+    foreach ($line in [IO.File]::ReadAllLines($IniPath)) {
+        foreach ($key in $script:ForkPreservedIniKeys.Keys) {
+            if ($line -notmatch "^\s*$key\s*=\s*(\S.*?)\s*$") { continue }
+            $value = $Matches[1]
+            if ($value -match $script:ForkPreservedIniKeys[$key]) { $values[$key] = $value }
+        }
+    }
+    return $values
+}
+
+function Write-ForkIniKeys([string]$IniPath, $Values) {
+    if ($Values.Count -eq 0) { return }
+    # The shipped ini has no fork keys, so preserved ones are appended to the
+    # [mod] section (the file's only section).
+    $iniText = [IO.File]::ReadAllText($IniPath).TrimEnd("`r", "`n")
+    foreach ($key in $Values.Keys) {
+        $pattern = "(?m)^\s*$key\s*=.*$"
+        if ([Text.RegularExpressions.Regex]::IsMatch($iniText, $pattern)) {
+            $iniText = [Text.RegularExpressions.Regex]::Replace(
+                $iniText, $pattern, "$key=$($Values[$key])")
+        } else {
+            $iniText += "`r`n$key=$($Values[$key])"
+        }
+    }
+    $utf8NoBom = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($IniPath, $iniText + "`r`n", $utf8NoBom)
+}
+
 $source = Resolve-ReleaseDirectory $SourceDirectory
 $install = [IO.Path]::GetFullPath($InstallDirectory)
 $expectedInstall = [IO.Path]::GetFullPath((Join-Path $env:PUBLIC 'AMExclusive'))
@@ -120,7 +158,6 @@ Write-ProgressMilestone 32 'stop_runtime'
 
 $preservedMode = $null
 $preservedPeriod100ns = $null
-$preservedOutput = [ordered]@{}
 foreach ($existingIni in @(
     (Join-Path $install 'am-exclusive.ini')
 )) {
@@ -136,15 +173,10 @@ foreach ($existingIni in @(
                 $preservedPeriod100ns = $candidatePeriod
             }
         }
-        if ($line -match '^\s*output\s*=\s*(wasapi|asio)\s*$') {
-            $preservedOutput['output'] = $Matches[1].ToLowerInvariant()
-        }
-        if ($line -match '^\s*asio_driver\s*=\s*(\S.*?)\s*$') {
-            $preservedOutput['asio_driver'] = $Matches[1]
-        }
     }
     if ($preservedMode -and $preservedPeriod100ns) { break }
 }
+$preservedForkIni = Read-ForkIniKeys (Join-Path $install 'am-exclusive.ini')
 
 if (Test-Path -LiteralPath $install -PathType Container) {
     foreach ($obsolete in @('am-exclusive-controller.exe', 'am-exclusive-pcm-probe.dll')) {
@@ -182,23 +214,7 @@ if ($preservedPeriod100ns) {
     $utf8NoBom = New-Object Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($iniPath, $iniText, $utf8NoBom)
 }
-if ($preservedOutput.Count -gt 0) {
-    # The shipped ini has no output keys, so preserved ones are appended to
-    # the [mod] section (the file's only section).
-    $iniPath = Join-Path $install 'am-exclusive.ini'
-    $iniText = [IO.File]::ReadAllText($iniPath).TrimEnd("`r", "`n")
-    foreach ($key in $preservedOutput.Keys) {
-        $pattern = "(?m)^\s*$key\s*=.*$"
-        if ([Text.RegularExpressions.Regex]::IsMatch($iniText, $pattern)) {
-            $iniText = [Text.RegularExpressions.Regex]::Replace(
-                $iniText, $pattern, "$key=$($preservedOutput[$key])")
-        } else {
-            $iniText += "`r`n$key=$($preservedOutput[$key])"
-        }
-    }
-    $utf8NoBom = New-Object Text.UTF8Encoding($false)
-    [IO.File]::WriteAllText($iniPath, $iniText + "`r`n", $utf8NoBom)
-}
+Write-ForkIniKeys (Join-Path $install 'am-exclusive.ini') $preservedForkIni
 foreach ($script in $installerScripts) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $install $script) -Force
 }

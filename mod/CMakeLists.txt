@@ -73,7 +73,8 @@ else()
 endif()
 set_target_properties(am_exclusive_hook PROPERTIES OUTPUT_NAME "am-exclusive-hook")
 
-add_library(am_exclusive_ui SHARED src/UiAdapter.cpp src/IpcTransport.cpp)
+add_library(am_exclusive_ui SHARED src/UiAdapter.cpp src/IpcTransport.cpp
+  src/ForkOutputDevice.cpp)
 add_dependencies(am_exclusive_ui generate_winui_projection)
 target_include_directories(am_exclusive_ui PRIVATE src "${WINRT_GENERATED_DIR}")
 target_compile_definitions(am_exclusive_ui PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -84,7 +85,8 @@ add_executable(am_exclusive_media_control src/MediaSessionControl.cpp)
 target_compile_definitions(am_exclusive_media_control PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(am_exclusive_media_control PRIVATE ole32 runtimeobject windowsapp)
 
-add_executable(am_exclusive_broker src/Broker.cpp src/IpcTransport.cpp)
+add_executable(am_exclusive_broker src/Broker.cpp src/IpcTransport.cpp
+  src/ForkBrokerOutput.cpp)
 target_include_directories(am_exclusive_broker PRIVATE src)
 target_compile_definitions(am_exclusive_broker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(am_exclusive_broker PRIVATE advapi32 ole32 comctl32)
