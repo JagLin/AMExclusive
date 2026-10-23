@@ -1240,8 +1240,13 @@ std::wstring DeviceId(IMMDevice* device) {
     return result;
 }
 
+// With `queued`, the hook is only armed; MH_ApplyQueued enables every queued
+// hook under one thread freeze. Each MH_EnableHook freezes and resumes all of
+// AMPLibraryAgent's threads (~47 ms there), so per-hook enabling of the
+// production set alone took ~0.9 s at startup.
 template<typename Fn>
-bool HookAddress(void* target, void* detour, Fn& original, const wchar_t* label) {
+bool HookAddress(void* target, void* detour, Fn& original, const wchar_t* label,
+                 bool queued = false) {
     std::lock_guard lock(g_hookMutex);
     if (original) return true;
     void* trampoline{};
@@ -1251,12 +1256,12 @@ bool HookAddress(void* target, void* detour, Fn& original, const wchar_t* label)
         return false;
     }
     original = reinterpret_cast<Fn>(trampoline);
-    const MH_STATUS enable = MH_EnableHook(target);
+    const MH_STATUS enable = queued ? MH_QueueEnableHook(target) : MH_EnableHook(target);
     if (enable != MH_OK && enable != MH_ERROR_ENABLED) {
         Log(std::wstring(L"hook enable failed ") + label + L" status=" + std::to_wstring(enable));
         return false;
     }
-    Log(std::wstring(L"hooked ") + label);
+    Log(std::wstring(queued ? L"queued hook " : L"hooked ") + label);
     return true;
 }
 
@@ -3388,7 +3393,8 @@ bool InstallAudioCoreV2Hooks() {
     auto installToolbox = [toolbox](const char* name, void* detour, auto& original,
                                     const wchar_t* label) {
         auto* target = GetProcAddress(toolbox, name);
-        return target && HookAddress(reinterpret_cast<void*>(target), detour, original, label);
+        return target && HookAddress(reinterpret_cast<void*>(target), detour, original, label,
+                                     true);
     };
     const bool converterNew = installToolbox(
         "AudioConverterNew", reinterpret_cast<void*>(&HookV2AudioConverterNew),
@@ -3440,11 +3446,27 @@ bool InstallAudioCoreV2Hooks() {
     const bool coCreate = coCreateTarget && HookAddress(
         coCreateTarget,
         reinterpret_cast<void*>(&HookV2CoCreateInstance), g_v2OriginalCoCreateInstance,
-        L"CoCreateInstance [v2 audio-client gate]");
+        L"CoCreateInstance [v2 audio-client gate]", true);
+    // Hooks queued on an earlier, partially failed pass are applied here too,
+    // matching the old per-hook behaviour where each one went live at once.
+    MH_STATUS applied{};
+    std::int64_t applyQpc{};
+    {
+        std::lock_guard lock(g_hookMutex);
+        const auto applyStart = CurrentQpc();
+        applied = MH_ApplyQueued();
+        applyQpc = CurrentQpc() - applyStart;
+    }
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+    Log(L"audio core v2 queued hooks applied status=" + std::to_wstring(applied) +
+        L" elapsedUs=" + std::to_wstring(frequency.QuadPart
+            ? applyQpc * 1000000 / frequency.QuadPart : 0));
     const bool ready = converterNew && converterSpecific && converterProperty &&
                        converterGetProperty && converterFill && converterConvert &&
                        converterReset && converterDispose && unitSetProperty && unitRender && unitStart &&
-                       unitStop && unitInitialize && unitUninitialize && coCreate;
+                       unitStop && unitInitialize && unitUninitialize && coCreate &&
+                       applied == MH_OK;
     if (ready) {
         g_audioCoreV2HooksInstalled.store(true, std::memory_order_release);
         Log(L"audio core v2 production hooks ready: native P0 callback handoff + Mod-owned Fill + native render gate");
