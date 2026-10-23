@@ -609,7 +609,10 @@ void AudioCoreRuntime::OnConverterDisposed(void* converter) noexcept {
             if (graphConverter_ == converter) graphConverter_ = nullptr;
         } else {
             RetireCaptureLocked(true);
-            graphConverter_ = nullptr;
+            // A streaming seek initializes the successor graph before Apple
+            // disposes this converter; that identity must survive so the
+            // worker can bind the staged successor.
+            if (graphConverter_ == converter) graphConverter_ = nullptr;
         }
     }
     Wake();
@@ -1206,6 +1209,14 @@ DWORD AudioCoreRuntime::WorkerMain() noexcept {
                                                            std::memory_order_release);
                     }
                 }
+            }
+            // A predecessor retired outside FinalizeEndOfStreamDrainLocked (its
+            // converter disposed, or a late producer EOF found an empty queue)
+            // leaves an already initialized and started successor graph behind.
+            // Apple sends no further lifecycle event for it, so bind it here.
+            if (!graphBound_ && graphConverter_ &&
+                successorStageConverter_.load(std::memory_order_acquire) == graphConverter_) {
+                TryBindGraphLocked();
             }
             TryActivateLocked();
             // Staged successor frames are already decoded media the sink will
