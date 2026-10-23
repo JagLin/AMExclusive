@@ -3289,7 +3289,7 @@ ammod::audio_v2::NativeAudioCallbacks V2NativeCallbacks() noexcept {
             &V2OnNativeService, &V2NativePumpPeriodMs};
 }
 
-void HookV2Device(IMMDevice* device);
+void HookV2Device(IMMDevice* device, bool queued = false);
 
 HRESULT STDMETHODCALLTYPE HookV2DeviceActivate(IMMDevice* self, REFIID iid, DWORD context,
                                                PROPVARIANT* params, void** object) {
@@ -3359,21 +3359,51 @@ HRESULT STDMETHODCALLTYPE HookV2GetDevice(IMMDeviceEnumerator* self, LPCWSTR id,
     return result;
 }
 
-void HookV2Device(IMMDevice* device) {
+void HookV2Device(IMMDevice* device, bool queued) {
     auto** table = Vtable(device);
     if (table) HookAddress(table[3], reinterpret_cast<void*>(&HookV2DeviceActivate),
-                           g_v2OriginalDeviceActivate, L"IMMDevice::Activate [v2]");
+                           g_v2OriginalDeviceActivate, L"IMMDevice::Activate [v2]", queued);
 }
 
-void HookV2Enumerator(IMMDeviceEnumerator* enumerator) {
+void HookV2Enumerator(IMMDeviceEnumerator* enumerator, bool queued = false) {
     auto** table = Vtable(enumerator);
     if (!table) return;
     HookAddress(table[3], reinterpret_cast<void*>(&HookV2EnumAudioEndpoints),
-                g_v2OriginalEnumAudioEndpoints, L"IMMDeviceEnumerator::EnumAudioEndpoints [v2]");
+                g_v2OriginalEnumAudioEndpoints, L"IMMDeviceEnumerator::EnumAudioEndpoints [v2]",
+                queued);
     HookAddress(table[4], reinterpret_cast<void*>(&HookV2GetDefaultEndpoint),
-                g_v2OriginalGetDefaultEndpoint, L"IMMDeviceEnumerator::GetDefaultAudioEndpoint [v2]");
+                g_v2OriginalGetDefaultEndpoint, L"IMMDeviceEnumerator::GetDefaultAudioEndpoint [v2]",
+                queued);
     HookAddress(table[5], reinterpret_cast<void*>(&HookV2GetDevice),
-                g_v2OriginalGetDevice, L"IMMDeviceEnumerator::GetDevice [v2]");
+                g_v2OriginalGetDevice, L"IMMDeviceEnumerator::GetDevice [v2]", queued);
+}
+
+// Apple's output unit can activate its IAudioClient from an enumerator it
+// created before the CoCreateInstance hook went live. The vtable hooks above
+// would then only arm on a later enumeration, and that first client (the first
+// track after launch) is never wrapped. MMDevAPI's vtables are shared by every
+// instance, so arm them now from an enumerator of our own. Without a default
+// render endpoint the lazy path above still arms Activate later.
+bool ArmV2DeviceVtableHooks() {
+    if (g_v2OriginalDeviceActivate) return true;
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IMMDeviceEnumerator* enumerator{};
+    const auto create = g_v2OriginalCoCreateInstance ? g_v2OriginalCoCreateInstance
+                                                     : &CoCreateInstance;
+    if (SUCCEEDED(create(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
+                         __uuidof(IMMDeviceEnumerator),
+                         reinterpret_cast<void**>(&enumerator))) && enumerator) {
+        HookV2Enumerator(enumerator, true);
+        IMMDevice* device{};
+        if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device)) &&
+            device) {
+            HookV2Device(device, true);
+            device->Release();
+        }
+        enumerator->Release();
+    }
+    if (SUCCEEDED(init)) CoUninitialize();
+    return g_v2OriginalDeviceActivate != nullptr;
 }
 
 HRESULT WINAPI HookV2CoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD context,
@@ -3447,6 +3477,9 @@ bool InstallAudioCoreV2Hooks() {
         coCreateTarget,
         reinterpret_cast<void*>(&HookV2CoCreateInstance), g_v2OriginalCoCreateInstance,
         L"CoCreateInstance [v2 audio-client gate]", true);
+    if (!ArmV2DeviceVtableHooks()) {
+        Log(L"audio core v2 IMMDevice::Activate not armed at startup; waiting for enumeration");
+    }
     // Hooks queued on an earlier, partially failed pass are applied here too,
     // matching the old per-hook behaviour where each one went live at once.
     MH_STATUS applied{};
