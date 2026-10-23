@@ -374,6 +374,9 @@ Xaml::Window GetXamlWindowProperty(std::wstring_view propertyName) {
     try {
         return function(hstring(propertyName)).try_as<Xaml::Window>();
     } catch (const hresult_error& error) {
+        // E_BOUNDS only means that window is not open; the transport and
+        // status timers poll for it every few seconds.
+        if (error.code() == E_BOUNDS) return nullptr;
         Log(L"GetAppProperty(" + std::wstring(propertyName) + L") failed hr=0x" +
             [&] { std::wostringstream text; text << std::hex << error.code().value; return text.str(); }());
         return nullptr;
@@ -1012,10 +1015,13 @@ void AttachTransportObservers() {
                                 if (auto row = current.try_as<Controls::ListViewItem>()) {
                                     const auto rowIdentity = DependencyObjectIdentity(row);
                                     const auto now = GetTickCount64();
+                                    // Use the same window Apple's DoubleTapped
+                                    // uses; a looser one turns two single clicks
+                                    // on a playing list into a phantom selection.
                                     const bool secondPress = rowIdentity != 0 &&
                                         rowIdentity == g_lastTrackRowPressIdentity &&
                                         now >= g_lastTrackRowPressTick &&
-                                        now - g_lastTrackRowPressTick <= 650;
+                                        now - g_lastTrackRowPressTick <= GetDoubleClickTime();
                                     if (secondPress) {
                                         const auto epoch = g_lastTrackRowPressEpoch;
                                         g_lastTrackRowPressIdentity = 0;

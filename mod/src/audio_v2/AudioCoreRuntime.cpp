@@ -289,10 +289,13 @@ void AudioCoreRuntime::OnTransportSkip(std::uint64_t epoch) noexcept {
             return;
         }
     }
-    // Previous/Next, or a direct-selection confirmation that still owns the
-    // armed generation, is an explicit retirement rather than natural EOS.
+    // Previous/Next is an explicit retirement rather than natural EOS. A
+    // direct selection is only inferred from two presses on one row, which
+    // two single clicks on a list Apple keeps playing also produce. Leave that
+    // generation playing: the fence makes Apple's own Stop/Dispose retire it
+    // instead of sealing an EOS drain, and lapses if Apple never follows.
     DiscardSuccessorStageLocked(nullptr);
-    RetireCaptureLocked(true);
+    if (transportSkip || !directSelection) RetireCaptureLocked(true);
     seekFence_ = true;
     seekFenceReleaseTick_ = GetTickCount64() + 500;
     Wake();
