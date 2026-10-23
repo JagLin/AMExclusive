@@ -136,7 +136,22 @@
 - 使用者原話：「現在開始查同取樣率時 Apple 走哪條路，需要我開 native_trace 就說。」修法由模型依 trace 決定並直接實作。
 - 依據：F-44。
 - 驗證（2026-10-23 18:34，預設格式 48 kHz、JPLAY 8192 frames）：48 kHz／24-bit 本機檔走 ConvertBuffer（每次 16380 bytes = 2730 frames），`exclusive sink active`，`sourceWaits=0`、`droppedFrames=0`；44.1 kHz 本機檔照舊走 Fill 也正常。使用者：「兩首都可以撥」。
-- 狀態：本機已安裝驗證，`native_trace` 已移除；尚未 commit。
+- 狀態：已 commit（`8d17678`）。
+
+### ADR-21 獨占輸出那組 hook 改成佇列後一次啟用
+- 決定：`HookAddress` 加 `queued` 參數，`InstallAudioCoreV2Hooks` 的 15 個 toolbox hook 與 `CoCreateInstance` 改用 `MH_QueueEnableHook`，最後一次 `MH_ApplyQueued`；套用失敗時下一輪重試，ready 條件包含套用成功。音質鎖與 IMMDevice vtable hook 照舊逐一啟用。
+- 使用者原話：「把獨占輸出那組 hook 改成 MH_QueueEnableHook 加一次 MH_ApplyQueued，編譯後裝到本機量啟動時間。」
+- 依據：每次 `MH_EnableHook` 都會暫停再恢復 AMPLibraryAgent 的所有執行緒，本機每個約 47 ms，19 個共約 0.9 秒（18:33:43.08 載入 → 18:33:44.05 就緒）。
+- 量測（本機，2026-10-23 18:42）：Apple Music 啟動 18:42:21.187 → broker 18:42:22.237（工作排程器延遲約 1.05 秒，未改）→ hook DLL 載入 18:42:22.269 → 獨占輸出 hook 就緒 18:42:22.501（0.23 秒，原約 0.95 秒；`MH_ApplyQueued` 本身 54 ms）。從啟動到就緒約 1.3 秒，原約 2.0 秒。
+- 狀態：與 ADR-22 一起驗證通過，尚未 commit。
+
+### ADR-22 啟動時就裝好 IMMDeviceEnumerator／IMMDevice 的 vtable hook
+- 決定：新增 `ArmV2DeviceVtableHooks`：在 `InstallAudioCoreV2Hooks` 內用 mod 自己的 MMDeviceEnumerator 與預設 render 端點，把 `EnumAudioEndpoints`／`GetDefaultAudioEndpoint`／`GetDevice`／`IMMDevice::Activate` 一起排進 ADR-21 的批次。原本只在 Apple 經由已 hook 的 `CoCreateInstance` 建立列舉器後才延遲安裝的路徑保留，作為沒有預設端點時的後備。
+- 使用者原話：「我測了一下感覺行為有點奇怪 有時候不會啟動ame 你檢查一下」。修法由模型依 log 決定並直接實作。
+- 依據：F-45。
+- 量測（18:47:40）：hook DLL 載入 → 包含裝置 hook 在內全部就緒 0.34 秒，`MH_ApplyQueued` 47 ms。
+- 驗證（2026-10-23）：重開兩次、開啟後盡快播放，第一首都接上：18:48:46.189 `bound` 同時 `native client Initialize`，0.19 秒後 `exclusive sink active`；18:49:06.917（agent 載入後約 5 秒）同樣，0.16 秒後 active。使用者：「看起來都有走了 我啟動後有儘快按下撥放」。
+- 狀態：已驗證，尚未 commit。
 
 ## §2 Open Questions
 
@@ -389,3 +404,10 @@ Win10 log（`am-exclusive(1).log`，pid 3968）00:44:49 這次 48k→44.1k 換�
 - native_trace 確認（2026-10-23 18:28–18:30）：48 kHz 那首的轉換器 4149 從建立到 dispose，`AudioConverterFillComplexBuffer` 0 次，只查了 `'cobs'`（計算輸出 buffer 大小）；44.1 kHz 那首有 192 次 Fill，並設了 `'srcq'`、查了 `'prim'`／`'prmm'`。`dumpbin /imports` 顯示 AMPLibraryAgent 另外匯入 `AudioConverterConvertBuffer`，mod 原本沒 hook。結論：同取樣率時 Apple 用 ConvertBuffer 整塊轉換，不走 input callback。F-16 的「ConvertBuffer 0 次」是在 AVCF 路徑，與這裡不矛盾。
 - 修正見 ADR-20。
 - 發現脈絡：重構版本機實測時，使用者新加一首歌，2026-10-23。
+
+### F-45 啟動後第一首偶爾沒接上：IMMDevice::Activate 延遲安裝來不及
+- 失敗的場次（18:33:43 舊版、18:43:13 與 18:44:31 批次版）第一首都是：`bound` 後一直沒有 `v2 native client Initialize`，停在 Probing，下一首才正常。這三次的 `IMMDevice::Activate` hook 都在第一次 `AudioOutputUnitStart` 之後才裝上（例：Start 18:43:25.933，Activate 18:43:26.157）。成功的場次，Activate hook 都在按播放之前就裝好了（例：18:34:14.685 裝好，18:34:17 才播放）。
+- 推論：Apple 的輸出單元用啟動初期（`CoCreateInstance` hook 生效前）拿到的裝置建立 `IAudioClient`；vtable hook 只在之後有人列舉裝置時才會裝，第一個 client 就沒被包裝。Apple 大約在啟動後 12 秒或第一次播放時列舉裝置，所以剛好在那時按播放就會漏接。
+- 與 ADR-21 批次啟用無關（舊版 18:33:55 就發生過），只是測試時剛好碰上。
+- 修正見 ADR-22。
+- 發現脈絡：使用者回報批次版「有時候不會啟動ame」，2026-10-23。
