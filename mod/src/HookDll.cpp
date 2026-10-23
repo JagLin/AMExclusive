@@ -135,6 +135,8 @@ using AudioConverterComplexInputDataProcFn = AppleOSStatus(__cdecl*)(
 using AudioConverterFillComplexBufferFn = AppleOSStatus(__cdecl*)(
     void*, AudioConverterComplexInputDataProcFn, void*, std::uint32_t*, void*, void*);
 using AudioConverterResetFn = AppleOSStatus(__cdecl*)(void*);
+using AudioConverterConvertBufferFn = AppleOSStatus(__cdecl*)(
+    void*, std::uint32_t, const void*, std::uint32_t*, void*);
 using AudioConverterDisposeFn = AppleOSStatus(__cdecl*)(void*);
 using AudioUnitSetPropertyFn = AppleOSStatus(__cdecl*)(
     void*, std::uint32_t, std::uint32_t, std::uint32_t, const void*, std::uint32_t);
@@ -202,6 +204,7 @@ AudioConverterSetPropertyFn g_v2OriginalAudioConverterSetProperty{};
 AudioConverterGetPropertyFn g_v2OriginalAudioConverterGetProperty{};
 AudioConverterFillComplexBufferFn g_v2OriginalAudioConverterFillComplexBuffer{};
 AudioConverterResetFn g_v2OriginalAudioConverterReset{};
+AudioConverterConvertBufferFn g_v2OriginalAudioConverterConvertBuffer{};
 AudioConverterDisposeFn g_v2OriginalAudioConverterDispose{};
 AudioUnitSetPropertyFn g_v2OriginalAudioUnitSetProperty{};
 AudioUnitRenderFn g_v2OriginalAudioUnitRender{};
@@ -2561,6 +2564,37 @@ AppleOSStatus __cdecl HookV2AudioConverterFillComplexBuffer(
     return result;
 }
 
+// When a local file already has the shared-mode mix rate, Apple skips SRC and
+// converts whole source buffers here instead of FillComplexBuffer, so no input
+// callback ever runs. The input buffer is then the pre-SRC boundary.
+AppleOSStatus __cdecl HookV2AudioConverterConvertBuffer(
+    void* converter, std::uint32_t inputBytes, const void* input,
+    std::uint32_t* outputBytes, void* output) {
+    const auto result = g_v2OriginalAudioConverterConvertBuffer
+        ? g_v2OriginalAudioConverterConvertBuffer(converter, inputBytes, input,
+                                                  outputBytes, output) : -1;
+    const auto localQueue = FindV2LocalQueue(converter);
+    if (g_nativeTraceEnabled.load(std::memory_order_acquire)) {
+        static std::atomic<std::uint64_t> traceCalls{};
+        const auto call = traceCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (call <= 64 || result != 0 || call % 256u == 0) {
+            Log(L"native trace AudioConverterConvertBuffer converter=" +
+                std::to_wstring(reinterpret_cast<std::uintptr_t>(converter)) +
+                L" call=" + std::to_wstring(call) +
+                L" inputBytes=" + std::to_wstring(inputBytes) +
+                L" outputBytes=" + std::to_wstring(outputBytes ? *outputBytes : 0u) +
+                L" localQueue=" + std::to_wstring(localQueue != nullptr) +
+                L" result=" + std::to_wstring(result));
+        }
+    }
+    if (result == 0 && localQueue && input && inputBytes != 0) {
+        localQueue->Push(input, inputBytes);
+        if (!localQueue->active) g_audioCoreRuntime.RequestLocalSuccessorBind(converter);
+        if (localQueue->active) (void)DrainV2LocalQueue(converter, localQueue);
+    }
+    return result;
+}
+
 AppleOSStatus __cdecl HookV2AudioConverterReset(void* converter) {
     const auto localQueue = FindV2LocalQueue(converter);
     bool localSeekReset{};
@@ -3371,6 +3405,9 @@ bool InstallAudioCoreV2Hooks() {
     const bool converterFill = installToolbox(
         "AudioConverterFillComplexBuffer", reinterpret_cast<void*>(&HookV2AudioConverterFillComplexBuffer),
         g_v2OriginalAudioConverterFillComplexBuffer, L"AudioConverterFillComplexBuffer [v2]");
+    const bool converterConvert = installToolbox(
+        "AudioConverterConvertBuffer", reinterpret_cast<void*>(&HookV2AudioConverterConvertBuffer),
+        g_v2OriginalAudioConverterConvertBuffer, L"AudioConverterConvertBuffer [v2]");
     const bool converterReset = installToolbox(
         "AudioConverterReset", reinterpret_cast<void*>(&HookV2AudioConverterReset),
         g_v2OriginalAudioConverterReset, L"AudioConverterReset [v2]");
@@ -3405,7 +3442,7 @@ bool InstallAudioCoreV2Hooks() {
         reinterpret_cast<void*>(&HookV2CoCreateInstance), g_v2OriginalCoCreateInstance,
         L"CoCreateInstance [v2 audio-client gate]");
     const bool ready = converterNew && converterSpecific && converterProperty &&
-                       converterGetProperty && converterFill &&
+                       converterGetProperty && converterFill && converterConvert &&
                        converterReset && converterDispose && unitSetProperty && unitRender && unitStart &&
                        unitStop && unitInitialize && unitUninitialize && coCreate;
     if (ready) {
