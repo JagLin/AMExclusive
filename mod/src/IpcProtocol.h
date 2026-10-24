@@ -12,7 +12,7 @@
 namespace ammod::ipc {
 
 inline constexpr std::uint32_t kMagic = 0x50494D41; // "AMIP" little-endian
-inline constexpr std::uint16_t kProtocolMajor = 4;
+inline constexpr std::uint16_t kProtocolMajor = 5;
 inline constexpr std::uint16_t kProtocolMinor = 0;
 inline constexpr std::size_t kEndpointIdChars = 256;
 inline constexpr std::size_t kEndpointNameChars = 128;

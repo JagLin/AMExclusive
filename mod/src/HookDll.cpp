@@ -3600,8 +3600,10 @@ DWORD WINAPI PipeClientLoop(void*) {
                     L" hardwareBufferMs=" + std::to_wstring(hardwareBufferMs));
             } else if (incoming.type == MessageType::TransportIntent) {
                 if (wcscmp(incoming.detail, L"play_pause") == 0) {
-                    g_audioCoreRuntime.OnTransportPlayPause();
-                    Log(L"transport intent play_pause");
+                    const bool paused =
+                        g_audioCoreRuntime.OnTransportPlayPause(incoming.fork.gestureQpc);
+                    Log(L"transport intent play_pause paused=" + std::to_wstring(paused ? 1 : 0) +
+                        L" gestureQpc=" + std::to_wstring(incoming.fork.gestureQpc));
                 } else if (wcscmp(incoming.detail, L"selection_arm") == 0) {
                     g_audioCoreRuntime.OnTransportSelectionArm(incoming.generation);
                     Log(L"transport intent selection_arm epoch=" +

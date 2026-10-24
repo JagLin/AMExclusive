@@ -112,7 +112,9 @@ public:
 
     // UI transport intents are control-plane only. They gate when the exact
     // endpoint stream may run; they never modify or synthesize PCM samples.
-    void OnTransportPlayPause() noexcept;
+    // gestureQpc is the UI's QPC at the press (0 when unknown). Returns true
+    // when the press paused the endpoint.
+    bool OnTransportPlayPause(std::int64_t gestureQpc) noexcept;
     void OnTransportSelectionArm(std::uint64_t epoch) noexcept;
     void OnTransportSkipArm(std::uint64_t epoch) noexcept;
     void OnTransportSkip(std::uint64_t epoch = 0) noexcept;
@@ -263,9 +265,13 @@ private:
     bool graphPaused_{};
     bool graphControlPending_{};
     bool userPauseIntent_{};
+    // The generation that was audible when the user paused. The pause belongs
+    // to that generation only; see TryActivateLocked.
+    std::uint64_t userPauseGeneration_{};
     bool seekFence_{};
     std::uint64_t latestSeekEpoch_{};
     ULONGLONG seekFenceReleaseTick_{};
+    ULONGLONG seekBeginTick_{};
     bool nativeInitialized_{};
     bool nativeStarted_{};
     bool graphBound_{};
@@ -313,6 +319,8 @@ private:
     std::atomic<std::uint64_t> successorStageReportDropped_{};
     std::uint64_t nextMediaGeneration_{1};
     std::atomic<std::uint64_t> boundMediaGeneration_{};
+    // QPC at which the current generation was bound; valid while graphBound_.
+    std::int64_t boundQpc_{};
     std::uint32_t requiredPrebufferFrames_{};
     std::wstring nativeEndpoint_;
     // Guarded by controlMutex_.

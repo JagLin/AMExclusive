@@ -71,6 +71,7 @@ std::atomic<std::uint64_t> g_transportEpoch{};
 std::atomic<std::uint64_t> g_activeSeekEpoch{};
 std::atomic<std::uintptr_t> g_activeSeekOwner{};
 std::atomic<ULONGLONG> g_lastSkipPointerTick{};
+std::atomic<std::int64_t> g_playPausePressQpc{};
 std::deque<Message> g_transportPending;
 std::vector<ObserverRef> g_transportButtonObservers;
 std::vector<ObserverRef> g_skipBackObservers;
@@ -259,15 +260,24 @@ bool TrySendConnectedMessage(const Message& message) {
     return WriteMessage(g_pipe, message);
 }
 
-void QueueTransport(std::wstring_view action, std::uint64_t epoch = 0) {
+std::int64_t CurrentQpc() noexcept {
+    LARGE_INTEGER value{};
+    QueryPerformanceCounter(&value);
+    return value.QuadPart;
+}
+
+void QueueTransport(std::wstring_view action, std::uint64_t epoch = 0,
+                    std::int64_t gestureQpc = 0) {
     if (action.empty()) return;
     auto message = NewMessage(MessageType::TransportIntent, Role::Ui);
     message.uiPid = GetCurrentProcessId();
     message.generation = epoch;
+    message.fork.gestureQpc = gestureQpc;
     wcsncpy_s(message.detail, action.data(), _TRUNCATE);
     if (TrySendConnectedMessage(message)) {
         Log(L"transport sent immediate action=" + std::wstring(action) +
-            L" epoch=" + std::to_wstring(epoch));
+            L" epoch=" + std::to_wstring(epoch) +
+            (gestureQpc != 0 ? L" gestureQpc=" + std::to_wstring(gestureQpc) : std::wstring{}));
         return;
     }
     {
@@ -886,7 +896,11 @@ void AttachTransportObservers() {
                                         g_lastTrackRowPressIdentity = rowIdentity;
                                         g_lastTrackRowPressTick = now;
                                         g_lastTrackRowPressEpoch = 0;
-                                        if (StatusSnapshot().state == RuntimeState::Active) {
+                                        // Gate on the user's intent, not on Active:
+                                        // a generation stuck short of Active is
+                                        // exactly when the user starts clicking
+                                        // other rows, and the Agent must see them.
+                                        if (StatusSnapshot().enabledIntent != 0) {
                                             const auto epoch =
                                                 g_transportEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
                                             g_lastTrackRowPressEpoch = epoch;
@@ -921,7 +935,20 @@ void AttachTransportObservers() {
             for (const auto& node : playPauseNodes) {
                 if (auto button = node.try_as<Primitives::ButtonBase>();
                     button && RememberObserver(g_transportButtonObservers, button)) {
-                    button.Click([](auto&&, auto&&) { QueueTransport(L"play_pause"); });
+                    // Apple acts on Click, i.e. on release. Stamping the press
+                    // keeps the gesture strictly ahead of whatever Apple does in
+                    // response; keyboard activation has no press and falls back
+                    // to the Click itself.
+                    button.AddHandler(
+                        Xaml::UIElement::PointerPressedEvent(),
+                        box_value(Input::PointerEventHandler([](auto&&, auto&&) {
+                            g_playPausePressQpc.store(CurrentQpc(), std::memory_order_release);
+                        })), true);
+                    button.Click([](auto&&, auto&&) {
+                        const auto pressed =
+                            g_playPausePressQpc.exchange(0, std::memory_order_acq_rel);
+                        QueueTransport(L"play_pause", 0, pressed != 0 ? pressed : CurrentQpc());
+                    });
                 }
             }
 

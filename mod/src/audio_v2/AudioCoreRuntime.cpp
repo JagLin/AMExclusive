@@ -31,6 +31,9 @@ constexpr std::uint64_t kSuccessorStageFrames = 192000ull * 8u;
 constexpr std::size_t kSuccessorReplayBlockLimit = kProductionQueueCapacity - 16u;
 constexpr std::uint32_t kSuccessorStageReplayed = 1;
 constexpr std::uint32_t kSuccessorStageDiscarded = 2;
+// The UI sends seek_commit on pointer release, cancel, capture loss and window
+// or popup close. Only a gesture that ends some other way reaches this bound.
+constexpr ULONGLONG kSeekCommitFuseMs = 10000;
 
 bool IsLossyAacFormat(std::uint32_t formatId) noexcept {
     return formatId == kQaac;
@@ -204,15 +207,22 @@ void AudioCoreRuntime::SetOutputBackend(ExclusiveSinkBackend backend,
     asioDriver_ = asioDriver;
 }
 
-void AudioCoreRuntime::OnTransportPlayPause() noexcept {
-    if (!UiEnabled()) return;
+bool AudioCoreRuntime::OnTransportPlayPause(std::int64_t gestureQpc) noexcept {
+    if (!UiEnabled()) return false;
     std::lock_guard lock(controlMutex_);
     // Apple's resume position for an unbound successor is not known here;
     // fall back to live capture rather than risk replaying audio twice.
     DiscardSuccessorStageLocked(nullptr);
-    if (coordinator_.Phase() == AudioCoreGatePhase::Active &&
+    // The intent can arrive after Apple has already acted on the same press: a
+    // local resume creates, binds and activates a new generation in ~140 ms
+    // while the intent needs ~250 ms over UI -> Broker -> Agent. A generation
+    // bound after the press is that press's own result, so the press cannot be
+    // pausing it. Ordering on the shared QPC clock needs no time window.
+    const bool boundAfterPress = gestureQpc != 0 && graphBound_ && boundQpc_ > gestureQpc;
+    if (!boundAfterPress && coordinator_.Phase() == AudioCoreGatePhase::Active &&
         coordinator_.SinkState() == ExclusiveSinkState::Running) {
         userPauseIntent_ = true;
+        userPauseGeneration_ = boundMediaGeneration_.load(std::memory_order_acquire);
         coordinator_.PauseEndpoint();
         if (endOfStreamDrainPending_) {
             // Apple disposes a local file's converter as soon as pause is
@@ -224,12 +234,13 @@ void AudioCoreRuntime::OnTransportPlayPause() noexcept {
             // it and let the resumed graph rebind fresh.
             RetireCaptureLocked(true);
         }
-        return;
+        return true;
     }
 
     userPauseIntent_ = false;
     TryResumePausedSinkLocked();
     Wake();
+    return false;
 }
 
 void AudioCoreRuntime::OnTransportSelectionArm(std::uint64_t epoch) noexcept {
@@ -309,6 +320,7 @@ void AudioCoreRuntime::OnTransportSeekBegin(std::uint64_t epoch) noexcept {
     latestSeekEpoch_ = epoch;
     seekFence_ = true;
     seekFenceReleaseTick_ = 0;
+    seekBeginTick_ = GetTickCount64();
     // Silence the currently audible generation as soon as the user grabs the
     // scrubber. Apple may rebuild several transient graphs while the pointer
     // moves; those graphs may capture P0, but they are not allowed to own the
@@ -1381,6 +1393,9 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
     }
     boundConverter_.store(graphConverter_, std::memory_order_release);
     boundMediaGeneration_.store(generation, std::memory_order_release);
+    LARGE_INTEGER boundAt{};
+    QueryPerformanceCounter(&boundAt);
+    boundQpc_ = boundAt.QuadPart;
     graphBound_ = true;
     // Cut over only after roughly 100 ms is already captured. A single 20 ms
     // device period was too easy to drain during transient CPU scheduling load;
@@ -1414,9 +1429,29 @@ void AudioCoreRuntime::TryResumePausedSinkLocked() noexcept {
 }
 
 void AudioCoreRuntime::TryActivateLocked() noexcept {
-    if (userPauseIntent_) return;
+    if (userPauseIntent_) {
+        // Pause intent is a UI hint scoped to the generation that was audible
+        // when the user paused. Apple can start another item through paths the
+        // UI never reports (row play buttons, media keys, SMTC); a later
+        // generation that Apple has started and filled with a full prebuffer of
+        // P0 is playing, not paused. Holding the old intent here left that
+        // generation Bound forever while Apple's virtual output stayed silent.
+        if (boundMediaGeneration_.load(std::memory_order_acquire) == userPauseGeneration_ ||
+            !graphBound_ || !graphStarted_ || !nativeStarted_ ||
+            coordinator_.BufferedFrames() < requiredPrebufferFrames_) {
+            return;
+        }
+        userPauseIntent_ = false;
+    }
     if (seekFence_) {
-        if (seekFenceReleaseTick_ == 0 || GetTickCount64() < seekFenceReleaseTick_) return;
+        if (seekFenceReleaseTick_ == 0) {
+            // A seek_begin whose commit never arrives must not fence the
+            // endpoint forever. The fuse only bounds the wait; it never decides
+            // that a seek has settled while the commit is still on its way.
+            if (GetTickCount64() - seekBeginTick_ < kSeekCommitFuseMs) return;
+        } else if (GetTickCount64() < seekFenceReleaseTick_) {
+            return;
+        }
         seekFence_ = false;
         seekFenceReleaseTick_ = 0;
     }

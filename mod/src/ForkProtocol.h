@@ -31,6 +31,11 @@ struct ForkMessageFields {
     // restores the last driver.
     OutputBackend outputBackend{OutputBackend::Wasapi};
     wchar_t outputDevice[kOutputDeviceChars]{};
+    // TransportIntent: QueryPerformanceCounter at the user's gesture in the UI
+    // process, 0 when unknown. QPC is one system-wide clock, so the Agent can
+    // order the gesture against its own audio events no matter how late the
+    // intent itself arrives over IPC.
+    std::int64_t gestureQpc{};
 };
 #pragma pack(pop)
 
